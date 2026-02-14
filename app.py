@@ -16,9 +16,25 @@ st.markdown("""
 <style>
 @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+KR:wght@300;400;500;600;700&display=swap');
 html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif; }
-.block-container { max-width: 1240px; padding-top: 1.1rem; padding-bottom: 2rem; }
-h1 { font-size: 1.65rem !important; font-weight: 800 !important; letter-spacing: -0.02em; }
+
+/* ✅ 타이틀 잘림 방지 */
+header[data-testid="stHeader"] { height: 0.0rem; }
+.block-container { max-width: 1240px; padding-top: 2.0rem; padding-bottom: 2rem; }
+
+h1 {
+  font-size: 1.65rem !important;
+  font-weight: 800 !important;
+  letter-spacing: -0.02em;
+  line-height: 1.25 !important;
+  margin-top: .25rem !important;
+  padding-top: .15rem !important;
+}
+
+/* ✅ 섹션 제목 간격 */
+h2, h3 { letter-spacing: -0.02em; }
 .small { color: rgba(0,0,0,.55); font-size: .92rem; }
+
+/* ✅ 카드 */
 .card { border:1px solid rgba(0,0,0,.06); border-radius:16px; padding:12px 12px 10px 12px;
         background:#fff; box-shadow:0 8px 24px rgba(0,0,0,.05); }
 .ct { color: rgba(0,0,0,.62); font-weight:650; font-size:.92rem; margin-bottom:6px; }
@@ -27,6 +43,8 @@ h1 { font-size: 1.65rem !important; font-weight: 800 !important; letter-spacing:
 .dneg { color:#b42318; font-weight:650; font-size:.90rem; }
 .dflat{ color:rgba(0,0,0,.55); font-weight:650; font-size:.90rem; }
 .hr { border-top:1px solid rgba(0,0,0,.06); margin:.9rem 0 1.05rem 0; }
+
+/* ✅ 탭 */
 .stTabs [data-baseweb="tab-list"]{ gap: 8px; }
 .stTabs [data-baseweb="tab"]{
   height: 40px;
@@ -38,6 +56,7 @@ h1 { font-size: 1.65rem !important; font-weight: 800 !important; letter-spacing:
   border: 1px solid rgba(0,0,0,0.12) !important;
   box-shadow: 0 6px 18px rgba(0,0,0,0.06);
 }
+
 a { text-decoration: none; }
 a:hover { text-decoration: underline; }
 </style>
@@ -101,7 +120,46 @@ def kpi_card(title, last, delta, pct, precision=2, suffix=""):
     </div>
     """, unsafe_allow_html=True)
 
-def plot_lines(df: pd.DataFrame, title: str, height: int = 280, normalized: bool = False):
+def _close_series(df: pd.DataFrame) -> pd.Series:
+    if df is None or df.empty:
+        return pd.Series(dtype="float64")
+
+    out = df.copy()
+    if not isinstance(out.index, pd.DatetimeIndex):
+        out.index = pd.to_datetime(out.index)
+
+    if isinstance(out.columns, pd.MultiIndex):
+        if "Close" in out.columns.get_level_values(0):
+            c = out.xs("Close", axis=1, level=0)
+            if isinstance(c, pd.DataFrame):
+                return c.iloc[:, 0].dropna()
+            return c.dropna()
+
+    if "Close" in out.columns:
+        c = out["Close"]
+        if isinstance(c, pd.DataFrame):
+            return c.iloc[:, 0].dropna()
+        return c.dropna()
+
+    num_cols = [c for c in out.columns if pd.api.types.is_numeric_dtype(out[c])]
+    if not num_cols:
+        return pd.Series(dtype="float64")
+    c = out[num_cols[0]]
+    if isinstance(c, pd.DataFrame):
+        return c.iloc[:, 0].dropna()
+    return c.dropna()
+
+def resample_close(df: pd.DataFrame, freq: str) -> pd.DataFrame:
+    s = _close_series(df)
+    if s.empty:
+        return pd.DataFrame()
+    if freq == "D":
+        return s.to_frame("Close")
+    rule = "W-FRI" if freq == "W" else "M"
+    return s.resample(rule).last().dropna().to_frame("Close")
+
+# ✅ Plotly: 그래프 위 텍스트 겹침 해결(legend를 그래프 아래로 내림)
+def plot_lines(df: pd.DataFrame, title: str, height: int = 320, normalized: bool = False):
     if df is None or df.empty:
         st.info(f"{title}: 데이터가 없습니다.")
         return
@@ -122,59 +180,19 @@ def plot_lines(df: pd.DataFrame, title: str, height: int = 280, normalized: bool
         fig.add_trace(go.Scatter(x=d.index, y=d[c], mode="lines", name=str(c)))
 
     fig.update_layout(
-        title=title,
+        title=dict(text=title, x=0, xanchor="left"),
         height=height,
-        margin=dict(l=8, r=8, t=42, b=10),
-        legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0),
+        margin=dict(l=10, r=10, t=64, b=90),  # ✅ 아래 여백 크게
+        legend=dict(
+            orientation="h",
+            yanchor="top",
+            y=-0.22,        # ✅ 그래프 아래로 내림
+            xanchor="left",
+            x=0,
+            font=dict(size=12),
+        ),
     )
     st.plotly_chart(fig, use_container_width=True)
-
-def _close_series(df: pd.DataFrame) -> pd.Series:
-    """
-    yfinance 결과가 MultiIndex 컬럼이거나 Close가 DF로 잡히는 경우까지
-    안전하게 'Close'를 1차원 Series로 뽑아내기
-    """
-    if df is None or df.empty:
-        return pd.Series(dtype="float64")
-
-    out = df.copy()
-
-    if not isinstance(out.index, pd.DatetimeIndex):
-        out.index = pd.to_datetime(out.index)
-
-    # MultiIndex columns (('Close','KRW=X') 등)
-    if isinstance(out.columns, pd.MultiIndex):
-        if "Close" in out.columns.get_level_values(0):
-            c = out.xs("Close", axis=1, level=0)
-            if isinstance(c, pd.DataFrame):
-                return c.iloc[:, 0].dropna()
-            return c.dropna()
-
-    # Normal columns
-    if "Close" in out.columns:
-        c = out["Close"]
-        if isinstance(c, pd.DataFrame):
-            return c.iloc[:, 0].dropna()
-        return c.dropna()
-
-    # Fallback: first numeric col
-    num_cols = [c for c in out.columns if pd.api.types.is_numeric_dtype(out[c])]
-    if not num_cols:
-        return pd.Series(dtype="float64")
-    c = out[num_cols[0]]
-    if isinstance(c, pd.DataFrame):
-        return c.iloc[:, 0].dropna()
-    return c.dropna()
-
-def resample_close(df: pd.DataFrame, freq: str) -> pd.DataFrame:
-    s = _close_series(df)
-    if s.empty:
-        return pd.DataFrame()
-    if freq == "D":
-        return s.to_frame("Close")
-    rule = "W-FRI" if freq == "W" else "M"
-    return s.resample(rule).last().dropna().to_frame("Close")
-
 
 # =========================
 # Data (yfinance only)
@@ -186,7 +204,6 @@ def yf_close(symbol: str, start: str) -> pd.DataFrame:
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame()
 
-    # MultiIndex columns -> flatten to first level
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
 
@@ -197,9 +214,6 @@ def yf_close(symbol: str, start: str) -> pd.DataFrame:
 
 @st.cache_data(ttl=60 * 30)
 def yf_close_kr(ticker6: str, start: str) -> pd.DataFrame:
-    """
-    KRX 종목/ETF: 6자리 -> .KS/.KQ 자동 탐색
-    """
     t = clean_ticker(ticker6)
     if re.fullmatch(r"\d{6}", t):
         for suf in [".KS", ".KQ"]:
@@ -221,7 +235,6 @@ def rss_items(url: str, limit: int = 25):
             "published": getattr(e, "published", "") or getattr(e, "updated", "")
         })
     return out
-
 
 # =========================
 # Sidebar
@@ -299,9 +312,8 @@ TOP10_COMP = parse_list(top10_text)
 ETF10 = parse_list(etf10_text)
 
 KPI_COLS = 2 if mobile else 4
-CHART_H = 240 if mobile else 300
+CHART_H = 260 if mobile else 340  # ✅ 차트 높이 약간 늘려 레전드 공간 여유
 NEWS_COLS = 1 if mobile else 2
-
 
 # =========================
 # Header
@@ -312,7 +324,6 @@ st.markdown(
     unsafe_allow_html=True
 )
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-
 
 # =========================
 # Render Sections
@@ -355,12 +366,12 @@ def render_indices(freq: str, start: str):
             us[name] = d["Close"]
 
     if kr:
-        plot_lines(pd.DataFrame(kr), "KOSPI vs KOSDAQ (Normalized=100)", height=CHART_H, normalized=True)
+        plot_lines(pd.DataFrame(kr), "KOSPI vs KOSDAQ (정규화=100)", height=CHART_H, normalized=True)
     else:
         st.info("국내 지수 데이터를 가져오지 못했습니다.")
 
     if us:
-        plot_lines(pd.DataFrame(us), "US Indices (Normalized=100)", height=CHART_H, normalized=True)
+        plot_lines(pd.DataFrame(us), "US Indices (정규화=100)", height=CHART_H, normalized=True)
     else:
         st.info("미국 지수 데이터를 가져오지 못했습니다.")
 
@@ -373,7 +384,7 @@ def render_top10_companies(freq: str, start: str):
             prices[name] = d["Close"]
 
     if prices:
-        plot_lines(pd.DataFrame(prices), "KR Top10 Companies (Normalized=100)", height=CHART_H + 60, normalized=True)
+        plot_lines(pd.DataFrame(prices), "KR Top10 Companies (정규화=100)", height=CHART_H + 40, normalized=True)
     else:
         st.info("기업 주가 데이터를 가져오지 못했습니다. (티커 확인)")
 
@@ -386,7 +397,7 @@ def render_etf10(freq: str, start: str):
             prices[name] = d["Close"]
 
     if prices:
-        plot_lines(pd.DataFrame(prices), "KR ETF 10 (Normalized=100)", height=CHART_H + 60, normalized=True)
+        plot_lines(pd.DataFrame(prices), "KR ETF10 (정규화=100)", height=CHART_H + 40, normalized=True)
     else:
         st.info("ETF 데이터를 가져오지 못했습니다. (티커 확인)")
 
@@ -399,11 +410,13 @@ def render_fx_gold_oil(freq: str, start: str):
         ("WTI", "CL=F", 2),
     ]
 
-    for title, sym, prec in series:
-        base = yf_close(sym, start)
-        df = resample_close(base, freq)
-        last, delta, pct = metric(df)
-        kpi_card(title, last, delta, pct, precision=prec)
+    cols = st.columns(KPI_COLS)
+    for i, (title, sym, prec) in enumerate(series):
+        with cols[i % KPI_COLS]:
+            base = yf_close(sym, start)
+            df = resample_close(base, freq)
+            last, delta, pct = metric(df)
+            kpi_card(title, last, delta, pct, precision=prec)
 
 def render_news():
     st.subheader("실시간 경제 뉴스")
@@ -446,7 +459,6 @@ def render_news():
             render_list(rss_items(google_rss, limit=max(news_limit, 35)))
         except Exception as e:
             st.warning(f"구글 RSS 실패: {e}")
-
 
 # =========================
 # Main
