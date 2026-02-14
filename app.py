@@ -3,12 +3,12 @@ import pandas as pd
 from datetime import datetime, timedelta
 import feedparser
 import yfinance as yf
-import FinanceDataReader as fdr
 import plotly.graph_objects as go
+import re
 
 
 # -------------------------
-# Page
+# Page / CSS
 # -------------------------
 st.set_page_config(page_title="재테크 핵심지표 대시보드", page_icon="📈", layout="wide")
 
@@ -106,25 +106,39 @@ def plot_lines(df, title, height=260, normalized=False):
                       legend=dict(orientation="h", yanchor="bottom", y=1.02, xanchor="left", x=0))
     st.plotly_chart(fig, use_container_width=True)
 
+def clean_ticker(raw: str) -> str:
+    # "SK하이닉스,_000660" 같은 경우 대비: 숫자만 뽑기
+    raw = raw.strip()
+    # 숫자+문자 섞일 수 있으니, 6자리 숫자 있으면 그걸 우선
+    m = re.search(r"(\d{6})", raw)
+    if m:
+        return m.group(1)
+    return raw.replace(" ", "")
+
 @st.cache_data(ttl=60*30)
-def fdr_close(symbol, start):
-    df = fdr.DataReader(symbol, start)
+def yf_close(symbol: str, start: str) -> pd.DataFrame:
+    df = yf.download(symbol, start=start, progress=False, auto_adjust=False)
     if df is None or df.empty:
         return pd.DataFrame()
     if "Close" not in df.columns:
-        # 일부 지표는 컬럼명이 다를 수 있어 첫 numeric 열 사용
-        num = [c for c in df.columns if pd.api.types.is_numeric_dtype(df[c])]
-        if not num:
-            return pd.DataFrame()
-        df = df[[num[0]]].rename(columns={num[0]:"Close"})
-    return df[["Close"]]
-
-@st.cache_data(ttl=60*30)
-def yf_close(symbol, start):
-    df = yf.download(symbol, start=start, progress=False)
-    if df is None or df.empty:
         return pd.DataFrame()
     return df[["Close"]].dropna()
+
+@st.cache_data(ttl=60*30)
+def yf_close_kr(ticker6: str, start: str) -> pd.DataFrame:
+    """
+    KRX 종목/ETF: 6자리 -> .KS/.KQ 자동 탐색
+    """
+    t = clean_ticker(ticker6)
+    if re.fullmatch(r"\d{6}", t):
+        for suf in [".KS", ".KQ"]:
+            sym = f"{t}{suf}"
+            df = yf_close(sym, start)
+            if not df.empty:
+                return df
+        return pd.DataFrame()
+    # 이미 ^KS11 같은 지수/환율/원자재 심볼이면 그대로
+    return yf_close(t, start)
 
 @st.cache_data(ttl=60*10)
 def rss_items(url, limit=25):
@@ -194,6 +208,7 @@ ETF10 = parse_list(etf10_text)
 KPI_COLS = 2 if mobile else 4
 CHART_H = 240 if mobile else 300
 
+
 # -------------------------
 # Header
 # -------------------------
@@ -208,20 +223,20 @@ st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 def render(freq):
     start = (datetime.now() - timedelta(days={"D":180,"W":365*3,"M":365*10}[freq])).strftime("%Y-%m-%d")
 
-    # Snapshot
+    # Snapshot (전부 yfinance)
     cols = st.columns(KPI_COLS)
     kpis = [
-        ("KOSPI", ("FDR","KS11")),
-        ("KOSDAQ", ("FDR","KQ11")),
-        ("S&P 500", ("YF","^GSPC")),
-        ("NASDAQ", ("YF","^IXIC")),
-        ("USD/KRW", ("FDR","USD/KRW")),
-        ("Gold", ("YF","GC=F")),
-        ("WTI", ("YF","CL=F")),
+        ("KOSPI", "^KS11"),
+        ("KOSDAQ", "^KQ11"),
+        ("S&P 500", "^GSPC"),
+        ("NASDAQ", "^IXIC"),
+        ("USD/KRW", "KRW=X"),
+        ("Gold", "GC=F"),
+        ("WTI", "CL=F"),
     ]
-    for i,(name,(src,sym)) in enumerate(kpis):
+    for i,(name,sym) in enumerate(kpis):
         with cols[i % KPI_COLS]:
-            base = fdr_close(sym,start) if src=="FDR" else yf_close(sym,start)
+            base = yf_close(sym, start)
             df = resample_close(base, freq)
             last,delta,pct = metric(df)
             kpi_card(name,last,delta,pct,2)
@@ -231,8 +246,8 @@ def render(freq):
     # Indices charts
     st.subheader("주요 주가지수")
     kr = {}
-    for name,sym in [("KOSPI","KS11"),("KOSDAQ","KQ11")]:
-        d = resample_close(fdr_close(sym,start), freq)
+    for name,sym in [("KOSPI","^KS11"),("KOSDAQ","^KQ11")]:
+        d = resample_close(yf_close(sym,start), freq)
         if not d.empty: kr[name]=d["Close"]
     us = {}
     for name,sym in [("S&P500","^GSPC"),("NASDAQ","^IXIC"),("DOW","^DJI")]:
@@ -250,12 +265,12 @@ def render(freq):
     st.subheader("국내 10대 기업 (정규화 100 비교)")
     prices={}
     for n,t in TOP10:
-        d = resample_close(fdr_close(t,start), freq)
+        d = resample_close(yf_close_kr(t,start), freq)
         if not d.empty: prices[n]=d["Close"]
     if prices:
         plot_lines(pd.DataFrame(prices), "KR Top10 Companies (Normalized=100)", height=CHART_H+60, normalized=True)
     else:
-        st.info("기업 데이터가 없습니다. 티커를 확인해주세요.")
+        st.info("기업 데이터가 없습니다. (티커/상장시장 확인)")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
@@ -263,16 +278,16 @@ def render(freq):
     st.subheader("한국 대표 ETF 10 (정규화 100 비교)")
     prices={}
     for n,t in ETF10:
-        d = resample_close(fdr_close(t,start), freq)
+        d = resample_close(yf_close_kr(t,start), freq)
         if not d.empty: prices[n]=d["Close"]
     if prices:
         plot_lines(pd.DataFrame(prices), "KR ETF 10 (Normalized=100)", height=CHART_H+60, normalized=True)
     else:
-        st.info("ETF 데이터가 없습니다. 티커를 확인해주세요.")
+        st.info("ETF 데이터가 없습니다. (티커 확인)")
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-    # News (RSS stable)
+    # News (RSS)
     st.subheader("실시간 경제 뉴스")
     feeds = [
         ("Google 경제", "http://news.google.co.kr/news?pz=1&cf=all&ned=kr&hl=ko&topic=b&output=rss"),
