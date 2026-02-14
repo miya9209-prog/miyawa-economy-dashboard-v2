@@ -8,7 +8,14 @@ import requests
 import feedparser
 import yfinance as yf
 import plotly.graph_objects as go
-import FinanceDataReader as fdr
+
+# FinanceDataReader는 "있으면 쓰고, 없으면/막히면 우회"로 처리
+try:
+    import FinanceDataReader as fdr
+    HAS_FDR = True
+except Exception:
+    HAS_FDR = False
+
 
 # =========================================================
 # Page / CSS
@@ -69,6 +76,7 @@ h1 {
 }
 </style>
 """, unsafe_allow_html=True)
+
 
 # =========================================================
 # Utils
@@ -201,6 +209,14 @@ def get_start(freq: str) -> str:
     day = {"D": 220, "W": 1200, "M": 4200}.get(freq, 365)
     return (now() - timedelta(days=day)).strftime("%Y-%m-%d")
 
+def clean_ticker_6(s: str) -> str | None:
+    m = re.search(r"(\d{6})", (s or "").strip())
+    return m.group(1) if m else None
+
+def is_hangul(s: str) -> bool:
+    return bool(re.search(r"[가-힣]", s or ""))
+
+
 # =========================================================
 # Sidebar (설정)
 # =========================================================
@@ -211,84 +227,77 @@ freq = {"일간": "D", "주간": "W", "월간": "M"}[freq_label]
 news_n = st.sidebar.slider("뉴스 표시 개수", 5, 50, 20, step=5)
 keyword = st.sidebar.text_input("뉴스 키워드 필터(선택)", value="")
 
+
 # =========================================================
-# 관심종목 (한글 검색 “정렬” 개선)
+# ✅ 한글 종목검색: 네이버 금융 검색(HTML) 우회 (FDR 불안정 대비)
 # =========================================================
-@st.cache_data(ttl=60*60*24)
-def krx_listings():
-    frames = []
-    try:
-        krx = fdr.StockListing("KRX")[["Code", "Name", "Market"]].copy()
-        krx["Type"] = "STOCK"
-        frames.append(krx)
-    except Exception:
-        pass
+NAVER_SEARCH_URL = "https://finance.naver.com/search/searchList.naver"
 
-    try:
-        etf = fdr.StockListing("ETF/KR").copy()
-        if "Symbol" in etf.columns:
-            etf = etf.rename(columns={"Symbol": "Code"})
-        if "Code" in etf.columns and "Name" in etf.columns:
-            etf["Market"] = "ETF"
-            etf["Type"] = "ETF"
-            frames.append(etf[["Code", "Name", "Market", "Type"]])
-    except Exception:
-        pass
-
-    if not frames:
-        return pd.DataFrame(columns=["Code", "Name", "Market", "Type"])
-
-    df = pd.concat(frames, ignore_index=True).drop_duplicates()
-    df["Code"] = df["Code"].astype(str).str.zfill(6)
-    df["Name"] = df["Name"].astype(str)
-    if "Type" not in df.columns:
-        df["Type"] = "STOCK"
-    return df
-
-KRX = krx_listings()
-
-def clean_ticker_6(s: str) -> str | None:
-    m = re.search(r"(\d{6})", (s or "").strip())
-    return m.group(1) if m else None
-
-def score_match(name: str, q: str) -> int:
-    """정확일치(0) > 시작일치(1) > 포함(2) > 기타(9)"""
-    if not q:
-        return 9
-    if name == q:
-        return 0
-    if name.startswith(q):
-        return 1
-    if q in name:
-        return 2
-    return 9
-
-def search_krx(query: str, limit=20, prefer_stock=True) -> pd.DataFrame:
+def naver_search(query: str, limit=15):
+    """네이버 금융 검색: (이름, 6자리코드, 타입추정) 리스트 반환"""
     q = (query or "").strip()
-    if not q or KRX.empty:
-        return pd.DataFrame(columns=["Code", "Name", "Market", "Type"])
+    if not q:
+        return []
 
-    t6 = clean_ticker_6(q)
-    if t6:
-        out = KRX[KRX["Code"] == t6].copy()
-        return out.head(limit)
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
+    }
+    try:
+        r = requests.get(NAVER_SEARCH_URL, params={"query": q}, headers=headers, timeout=(6, 12))
+        if r.status_code != 200:
+            return []
+        html = r.text
+    except Exception:
+        return []
 
-    df = KRX.copy()
-    # 포함 검색
-    df = df[df["Name"].str.contains(q, case=False, na=False)].copy()
-    if df.empty:
-        return df
+    # 코드 패턴: /item/main.naver?code=005930
+    items = []
+    for m in re.finditer(r"/item/main\.naver\?code=(\d{6})", html):
+        code = m.group(1)
+        items.append(code)
 
-    # ✅ 점수화 + 주식 우선 정렬
-    df["match_score"] = df["Name"].apply(lambda x: score_match(str(x), q))
-    df["type_score"] = df["Type"].apply(lambda t: 0 if (prefer_stock and t == "STOCK") else (1 if t == "ETF" else 2))
-    df = df.sort_values(["match_score", "type_score", "Name"]).head(limit)
-    return df[["Code", "Name", "Market", "Type"]]
+    # 중복 제거
+    codes = []
+    seen = set()
+    for c in items:
+        if c not in seen:
+            seen.add(c)
+            codes.append(c)
 
+    # 이름 추출(간단 파싱): 코드 주변 링크 텍스트를 찾는다
+    results = []
+    for code in codes[:limit*2]:
+        # <a href="/item/main.naver?code=005930">삼성전자</a> 형태를 찾음
+        mm = re.search(rf'/item/main\.naver\?code={code}[^>]*>\s*([^<]+)\s*<', html)
+        name = mm.group(1).strip() if mm else code
+
+        # ETF 추정: 이름에 KODEX/TIGER/KBSTAR/ARIRANG/RIZE 등
+        typ = "ETF" if re.search(r"(KODEX|TIGER|KBSTAR|ARIRANG|RISE|HANARO|SOL)", name, re.IGNORECASE) else "STOCK"
+        results.append({"Name": name, "Code": code, "Type": typ})
+
+    # 정렬: (정확일치 > 시작 > 포함) + STOCK 우선
+    q0 = q
+    def score(x):
+        nm = x["Name"]
+        if nm == q0: ms = 0
+        elif nm.startswith(q0): ms = 1
+        elif q0 in nm: ms = 2
+        else: ms = 9
+        ts = 0 if x["Type"] == "STOCK" else 1
+        return (ms, ts, nm)
+
+    results = sorted(results, key=score)
+    # 상위 limit
+    return results[:limit]
+
+
+# =========================================================
+# 관심종목 상태
+# =========================================================
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 if "kr_results" not in st.session_state:
-    st.session_state.kr_results = pd.DataFrame()
+    st.session_state.kr_results = []
 
 def add_watch(name, code6):
     code6 = (code6 or "").strip()
@@ -308,20 +317,30 @@ def remove_watch(i):
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⭐ 관심종목 검색/추가")
-st.sidebar.caption("회사명/ETF명(한글) 또는 6자리 티커로 검색 후 + 로 추가하세요. (최대 10개)")
-prefer_stock = st.sidebar.toggle("주식(종목) 먼저 보기", value=True)
+st.sidebar.caption("한글 회사명도 검색됩니다(네이버 금융). 6자리 티커로 추가하는 게 가장 안정적입니다.")
 
 with st.sidebar.form("kr_search_form"):
     q = st.text_input("회사명/ETF명/6자리 티커", value="")
     do = st.form_submit_button("검색")
 
 if do:
-    st.session_state.kr_results = search_krx(q, limit=20, prefer_stock=prefer_stock)
+    q = (q or "").strip()
+    t6 = clean_ticker_6(q)
+    if t6:
+        # 6자리면 바로
+        st.session_state.kr_results = [{"Name": t6, "Code": t6, "Type": "STOCK"}]
+    else:
+        # ✅ 한글은 네이버 우선
+        if is_hangul(q):
+            st.session_state.kr_results = naver_search(q, limit=15)
+        else:
+            # 영문은 네이버로도 되고, 그냥 네이버로 통일
+            st.session_state.kr_results = naver_search(q, limit=15)
 
 results = st.session_state.kr_results
-if isinstance(results, pd.DataFrame) and not results.empty:
+if results:
     st.sidebar.markdown("**검색 결과**")
-    for _, row in results.iterrows():
+    for row in results:
         code = row["Code"]
         nm = row["Name"]
         typ = row.get("Type", "")
@@ -342,7 +361,7 @@ if isinstance(results, pd.DataFrame) and not results.empty:
                     st.sidebar.warning("추가 실패")
                 st.rerun()
 elif do:
-    st.sidebar.info("검색 결과가 없습니다. 정확한 회사명으로 다시 시도해보세요.")
+    st.sidebar.info("검색 결과가 없습니다. (회사명 일부만 넣어도 됩니다)")
 
 st.sidebar.markdown("**현재 관심종목**")
 for i, it in enumerate(st.session_state.watchlist):
@@ -353,6 +372,7 @@ for i, it in enumerate(st.session_state.watchlist):
         if st.sidebar.button("－", key=f"rm_{it['code']}"):
             remove_watch(i)
             st.rerun()
+
 
 # =========================================================
 # Header + Guide
@@ -374,7 +394,7 @@ if st.session_state.get("show_guide", False):
 - **정규화 100**: 시작점을 100으로 맞춰 “상대 강도” 비교  
 - **DXY(달러인덱스)**: 달러 강세/약세 흐름  
 - **WTI(서부텍사스유)**: 국제 유가(원유) 흐름  
-- **부동산(KOSIS)**: 느릴 수 있어 “수동 불러오기”로 동작 + 마지막 성공값 캐시  
+- **부동산(KOSIS)**: 느릴 수 있어 “수동 불러오기” + 실패 시 쿨다운으로 무한로딩 방지  
 """)
             if st.button("닫기"):
                 st.session_state.show_guide = False
@@ -387,7 +407,7 @@ if st.session_state.get("show_guide", False):
 - **정규화 100**: 시작점을 100으로 맞춰 “상대 강도” 비교  
 - **DXY(달러인덱스)**: 달러 강세/약세 흐름  
 - **WTI(서부텍사스유)**: 국제 유가(원유) 흐름  
-- **부동산(KOSIS)**: 느릴 수 있어 “수동 불러오기”로 동작 + 마지막 성공값 캐시  
+- **부동산(KOSIS)**: 느릴 수 있어 “수동 불러오기” + 실패 시 쿨다운으로 무한로딩 방지  
 """)
             if st.button("닫기"):
                 st.session_state.show_guide = False
@@ -395,10 +415,12 @@ if st.session_state.get("show_guide", False):
 
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
+
 # =========================================================
 # Tabs
 # =========================================================
 tabs = st.tabs(["시장 한눈에", "국내 Top10/ETF10", "내 관심종목", "부동산(KOSIS)", "경제뉴스"])
+
 
 # =========================================================
 # Tab 0: 시장 한눈에
@@ -417,6 +439,7 @@ with tabs[0]:
     gold   = resample_close(yf_close("GC=F", start), freq)
     wti    = resample_close(yf_close("CL=F", start), freq)
 
+    # 금 1돈(원/돈) 근사: 금선물(USD/oz)*환율*(3.75g/oz)
     gold_kr_1don = pd.Series(dtype="float64")
     if not gold.empty and not usdkrw.empty:
         aligned = pd.concat([gold, usdkrw], axis=1).dropna()
@@ -464,6 +487,7 @@ with tabs[0]:
     df_us = pd.DataFrame({"S&P500": normalize_100(spx), "NASDAQ": normalize_100(nas), "DOW": normalize_100(dow)}).dropna(how="all")
     plot_df(df_kr, "주요 주가지수 (정규화=100)", height=380)
     plot_df(df_us, "미국 증시 (정규화=100)", height=380)
+
 
 # =========================================================
 # Tab 1: 국내 Top10 / ETF10
@@ -521,6 +545,7 @@ with tabs[1]:
             series[name] = normalize_100(s)
     plot_df(pd.DataFrame(series).dropna(how="all"), "KR ETF Top10 (Normalized=100)", height=420)
 
+
 # =========================================================
 # Tab 2: 내 관심종목
 # =========================================================
@@ -540,25 +565,37 @@ with tabs[2]:
                 s[it["name"]] = normalize_100(ss)
         plot_df(pd.DataFrame(s).dropna(how="all"), "내 관심종목 (정규화 100)", height=420)
 
+
 # =========================================================
-# KOSIS (부동산) - 수동 호출 + 캐시
+# Tab 3: 부동산(KOSIS) — ✅ 무한 로딩 방지 버전
 # =========================================================
 KOSIS_URL = "https://kosis.kr/openapi/Param/statisticsParameterData.do"
 
-def kosis_request(params, timeout=20, retries=2, backoff=1.2):
+def kosis_request(params, timeout=10, retries=1):
+    """실패하면 즉시 반환(무한로딩 방지). User-Agent 필수."""
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
+        "Accept": "application/json,text/plain,*/*",
+    }
     last_err = None
-    for i in range(retries):
+    for _ in range(retries):
         try:
-            r = requests.get(KOSIS_URL, params=params, timeout=timeout)
+            r = requests.get(KOSIS_URL, params=params, headers=headers, timeout=(5, timeout))
             if r.status_code != 200:
                 last_err = {"err": "http", "errMsg": f"HTTP {r.status_code}"}
-                time.sleep(backoff * (i + 1))
                 continue
             return r.json(), None
         except Exception as e:
             last_err = {"err": "timeout", "errMsg": str(e)}
-            time.sleep(backoff * (i + 1))
     return None, last_err
+
+def parse_dt(x):
+    x = re.sub(r"[^0-9]", "", str(x))
+    if len(x) == 6:
+        return pd.to_datetime(x, format="%Y%m", errors="coerce")
+    if len(x) == 8:
+        return pd.to_datetime(x, format="%Y%m%d", errors="coerce")
+    return pd.to_datetime(x, errors="coerce")
 
 def pick_cols(df):
     date_col = "PRD_DE" if "PRD_DE" in df.columns else ("TIME" if "TIME" in df.columns else None)
@@ -570,22 +607,19 @@ def pick_cols(df):
     nm_cols = [c for c in df.columns if c.endswith("_NM") or c in ["OBJ_NM", "C1_NM", "C2_NM", "C3_NM"]]
     return date_col, val_col, nm_cols
 
-def parse_dt(x):
-    x = re.sub(r"[^0-9]", "", str(x))
-    if len(x) == 6:
-        return pd.to_datetime(x, format="%Y%m", errors="coerce")
-    if len(x) == 8:
-        return pd.to_datetime(x, format="%Y%m%d", errors="coerce")
-    return pd.to_datetime(x, errors="coerce")
-
+# 캐시/쿨다운(중요)
 if "kosis_cache_df" not in st.session_state:
     st.session_state.kosis_cache_df = None
 if "kosis_cache_time" not in st.session_state:
     st.session_state.kosis_cache_time = None
+if "kosis_last_fail_time" not in st.session_state:
+    st.session_state.kosis_last_fail_time = None
+if "kosis_last_fail_msg" not in st.session_state:
+    st.session_state.kosis_last_fail_msg = None
 
 with tabs[3]:
     st.markdown('<div class="section-title">부동산 지표 (KOSIS)</div>', unsafe_allow_html=True)
-    st.caption("✅ 자동 호출을 끄고 ‘불러오기’ 버튼을 눌렀을 때만 호출합니다. (느린 로딩 방지)")
+    st.caption("✅ ‘불러오기’ 버튼을 눌렀을 때만 호출합니다. 실패하면 3분 쿨다운으로 재호출을 막습니다.")
 
     api_key = st.secrets.get("KOSIS_API_KEY", "").strip()
     org_id = st.secrets.get("KOSIS_ORG_ID", "408").strip()
@@ -593,124 +627,108 @@ with tabs[3]:
     itm_id = st.secrets.get("KOSIS_ITM_ID", "").strip().replace("+", "").strip()
     prd_se = st.secrets.get("KOSIS_PRD_SE", "M").strip()
 
-    ui_left, ui_right, ui_btn = st.columns([1.2, 2.4, 1.2])
-    with ui_left:
+    c1, c2, c3 = st.columns([1.1, 2.6, 1.3])
+    with c1:
         desired = st.selectbox("가져올 기간(최근 개수)", [3, 6, 12], index=1)
-    with ui_right:
-        st.info("표가 크면 40,000셀 제한/타임아웃이 발생할 수 있어 자동으로 기간을 줄여 재시도합니다.", icon="ℹ️")
-    with ui_btn:
+    with c2:
+        st.info("표가 크면 제한/타임아웃이 나기 쉬워서, 실패 시 자동으로 기간을 줄여 재시도합니다.", icon="ℹ️")
+    with c3:
         fetch = st.button("불러오기/새로고침", use_container_width=True)
 
-    status_box = st.empty()
+    status = st.empty()
     chart_box = st.empty()
-    raw_box = st.empty()
 
-    if st.session_state.kosis_cache_time:
-        st.caption(f"마지막 성공 업데이트: {st.session_state.kosis_cache_time.strftime('%Y-%m-%d %H:%M:%S')}")
-
+    # Secrets 미설정
     if not api_key or not tbl_id or not itm_id:
-        status_box.warning("Secrets에 KOSIS_API_KEY / KOSIS_TBL_ID / KOSIS_ITM_ID 가 필요합니다.")
+        status.warning("Secrets에 KOSIS_API_KEY / KOSIS_TBL_ID / KOSIS_ITM_ID 가 필요합니다.")
     else:
+        # 쿨다운 체크
         if fetch:
-            candidates = [desired] + [c for c in [12, 6, 3] if c != desired]
-            ok_df = None
-            last_note = ""
-            last_err = None
-
-            with st.spinner("KOSIS 데이터 호출 중…"):
-                for cnt in candidates:
-                    params = {
-                        "method": "getList",
-                        "apiKey": api_key,
-                        "orgId": org_id,
-                        "tblId": tbl_id,
-                        "itmId": itm_id,
-                        "objL1": "ALL",
-                        "objL2": "ALL",
-                        "format": "json",
-                        "jsonVD": "Y",
-                        "prdSe": prd_se,
-                        "newEstPrdCnt": str(cnt),
-                        "loadGubun": "2",
-                    }
-                    data, err = kosis_request(params, timeout=20, retries=2, backoff=1.2)
-                    if err is not None:
-                        last_note = f"타임아웃/네트워크 실패 → 기간 축소 재시도 (newEstPrdCnt={cnt})"
-                        last_err = err
-                        continue
-                    if isinstance(data, dict) and "err" in data:
-                        last_note = f"KOSIS 에러({data.get('err')}): {data.get('errMsg','')}".strip()
-                        last_err = data
-                        continue
-                    if isinstance(data, list) and len(data) > 0:
-                        ok_df = pd.DataFrame(data)
-                        last_note = f"호출 성공 ✅ (newEstPrdCnt={cnt})"
-                        last_err = None
-                        break
-                    last_note = "응답은 받았지만 데이터가 비어있습니다."
-                    last_err = None
-
-            if ok_df is None or ok_df.empty:
-                status_box.warning("부동산 데이터를 가져오지 못했습니다. (다른 탭/기능은 정상)")
-                st.info(f"확인: orgId={org_id}, tblId={tbl_id}, itmId={itm_id}, prdSe={prd_se}")
-                st.info(last_note)
-                if last_err is not None:
-                    st.code(last_err, language="json")
+            if st.session_state.kosis_last_fail_time and (now() - st.session_state.kosis_last_fail_time).total_seconds() < 180:
+                status.warning("방금 실패해서 잠시(약 3분) 후 다시 시도해주세요. (무한로딩 방지)")
+                if st.session_state.kosis_last_fail_msg:
+                    st.code(st.session_state.kosis_last_fail_msg)
             else:
-                st.session_state.kosis_cache_df = ok_df
-                st.session_state.kosis_cache_time = now()
-                status_box.success(last_note)
+                candidates = [desired] + [c for c in [12, 6, 3] if c != desired]
+                ok_df = None
+                last_msg = None
 
-        # ✅ 버튼 안 눌러도 “마지막 성공 데이터”는 보여주기
+                with st.spinner("KOSIS 호출 중… (최대 10초 타임아웃)"):
+                    for cnt in candidates:
+                        params = {
+                            "method": "getList",
+                            "apiKey": api_key,
+                            "orgId": org_id,
+                            "tblId": tbl_id,
+                            "itmId": itm_id,
+                            "objL1": "ALL",
+                            "objL2": "ALL",
+                            "format": "json",
+                            "jsonVD": "Y",
+                            "prdSe": prd_se,
+                            "newEstPrdCnt": str(cnt),
+                            "loadGubun": "2",
+                        }
+                        data, err = kosis_request(params, timeout=10, retries=1)
+                        if err is not None:
+                            last_msg = err
+                            continue
+                        if isinstance(data, dict) and "err" in data:
+                            last_msg = data
+                            continue
+                        if isinstance(data, list) and len(data) > 0:
+                            ok_df = pd.DataFrame(data)
+                            break
+
+                if ok_df is None or ok_df.empty:
+                    st.session_state.kosis_last_fail_time = now()
+                    st.session_state.kosis_last_fail_msg = last_msg
+                    status.warning("부동산 데이터를 가져오지 못했습니다. (다른 탭/기능은 정상)")
+                    st.info(f"확인: orgId={org_id}, tblId={tbl_id}, itmId={itm_id}, prdSe={prd_se}")
+                    if last_msg:
+                        st.code(last_msg, language="json")
+                else:
+                    st.session_state.kosis_cache_df = ok_df
+                    st.session_state.kosis_cache_time = now()
+                    st.session_state.kosis_last_fail_time = None
+                    st.session_state.kosis_last_fail_msg = None
+                    status.success("호출 성공 ✅ (마지막 성공 데이터를 캐시해 계속 표시합니다.)")
+
+        # ✅ 캐시가 있으면 항상 보여주기
         df0 = st.session_state.kosis_cache_df
+        if st.session_state.kosis_cache_time:
+            st.caption(f"마지막 성공 업데이트: {st.session_state.kosis_cache_time.strftime('%Y-%m-%d %H:%M:%S')}")
         if df0 is None:
-            status_box.info("부동산은 서버가 느릴 수 있어 수동 호출입니다. 위의 ‘불러오기/새로고침’을 눌러주세요.")
+            status.info("현재 캐시된 부동산 데이터가 없습니다. ‘불러오기/새로고침’을 눌러 주세요.")
         else:
             date_col, val_col, nm_cols = pick_cols(df0)
             if date_col is None or val_col is None:
-                chart_box.warning("시계열 변환에 필요한 컬럼을 찾지 못했습니다. raw를 확인해주세요.")
-                with raw_box.container():
-                    with st.expander("raw 상위 50행"):
-                        st.dataframe(df0.head(50), use_container_width=True)
+                chart_box.warning("시계열 변환에 필요한 컬럼을 찾지 못했습니다. (표 구조가 다를 수 있어요)")
+                with st.expander("raw 상위 50행"):
+                    st.dataframe(df0.head(50), use_container_width=True)
             else:
-                if nm_cols:
-                    region_col = None
-                    for cand in ["C1_NM", "OBJ_NM", "C2_NM"]:
-                        if cand in df0.columns:
-                            region_col = cand
-                            break
-                    if region_col is None:
-                        region_col = nm_cols[0]
+                region_col = None
+                for cand in ["C1_NM", "OBJ_NM", "C2_NM"]:
+                    if cand in df0.columns:
+                        region_col = cand
+                        break
+                if region_col is None and nm_cols:
+                    region_col = nm_cols[0]
 
-                    tmp = pd.DataFrame({
-                        "date": df0[date_col].apply(parse_dt),
-                        "region": df0[region_col].astype(str),
-                        "value": pd.to_numeric(df0[val_col], errors="coerce")
-                    }).dropna()
+                tmp = pd.DataFrame({
+                    "date": df0[date_col].apply(parse_dt),
+                    "region": df0[region_col].astype(str) if region_col else "ALL",
+                    "value": pd.to_numeric(df0[val_col], errors="coerce")
+                }).dropna()
 
-                    if tmp.empty:
-                        chart_box.warning("변환 가능한 값이 없습니다. raw를 확인해주세요.")
-                    else:
-                        piv = tmp.pivot_table(index="date", columns="region", values="value", aggfunc="last").sort_index()
-                        auto = [c for c in piv.columns if any(k in c for k in ["서울", "부산", "대구", "경기"])]
-                        default = auto[:8] if auto else list(piv.columns)[:8]
+                piv = tmp.pivot_table(index="date", columns="region", values="value", aggfunc="last").sort_index()
+                auto = [c for c in piv.columns if any(k in c for k in ["서울", "부산", "대구", "경기"])]
+                default = auto[:8] if auto else list(piv.columns)[:8]
+                pick = st.multiselect("표시할 지역 선택", options=list(piv.columns), default=default)
 
-                        pick = st.multiselect("표시할 지역 선택", options=list(piv.columns), default=default)
-                        view = piv[pick] if pick else piv
+                view = piv[pick] if pick else piv
+                plot_df(view.apply(normalize_100), f"KOSIS 부동산 지표 (정규화100) · prdSe={prd_se}", height=420)
 
-                        with chart_box.container():
-                            plot_df(view.apply(normalize_100), f"KOSIS 부동산 지표 (정규화100) · prdSe={prd_se}", height=420)
-
-                        with raw_box.container():
-                            with st.expander("원자료(최근 30개)"):
-                                st.dataframe(view.tail(30), use_container_width=True)
-                else:
-                    s = pd.Series(
-                        pd.to_numeric(df0[val_col], errors="coerce").values,
-                        index=df0[date_col].apply(parse_dt)
-                    ).dropna().sort_index()
-                    with chart_box.container():
-                        plot_df(pd.DataFrame({"부동산지표": normalize_100(s)}), f"KOSIS 부동산 지표 (정규화100) · prdSe={prd_se}", height=420)
 
 # =========================================================
 # Tab 4: 경제뉴스 + 바로가기 버튼
@@ -769,8 +787,9 @@ with tabs[4]:
                 unsafe_allow_html=True
             )
 
+
 # =========================================================
-# Footer (copyright)
+# Footer
 # =========================================================
 st.markdown("""
 <div class="footer">
