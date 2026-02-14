@@ -3,5 +3,4 @@ pandas
 numpy
 feedparser
 yfinance
-finance-datareader
 plotly
