@@ -33,8 +33,13 @@ h1 {
 .small { color: rgba(0,0,0,.55); font-size: .92rem; }
 
 /* ✅ 카드 */
-.card { border:1px solid rgba(0,0,0,.06); border-radius:16px; padding:12px 12px 10px 12px;
-        background:#fff; box-shadow:0 8px 24px rgba(0,0,0,.05); }
+.card {
+  border:1px solid rgba(0,0,0,.06);
+  border-radius:16px;
+  padding:12px 12px 10px 12px;
+  background:#fff;
+  box-shadow:0 8px 24px rgba(0,0,0,.05);
+}
 .ct { color: rgba(0,0,0,.62); font-weight:650; font-size:.92rem; margin-bottom:6px; }
 .kpi { font-size: 1.20rem; font-weight: 800; letter-spacing: -0.02em; }
 .dpos { color:#0a7b34; font-weight:650; font-size:.90rem; }
@@ -57,6 +62,14 @@ h1 {
 
 a { text-decoration: none; }
 a:hover { text-decoration: underline; }
+
+/* ✅ footer 중앙정렬 */
+.footer {
+  text-align:center;
+  color: rgba(0,0,0,.45);
+  font-size: 0.86rem;
+  padding: 22px 0 6px 0;
+}
 </style>
 """, unsafe_allow_html=True)
 
@@ -156,7 +169,6 @@ def resample_close(df: pd.DataFrame, freq: str) -> pd.DataFrame:
     rule = "W-FRI" if freq == "W" else "M"
     return s.resample(rule).last().dropna().to_frame("Close")
 
-# ✅ Plotly: 그래프 위 텍스트 겹침 해결(legend를 그래프 아래로 내림)
 def plot_lines(df: pd.DataFrame, title: str, height: int = 320, normalized: bool = False):
     if df is None or df.empty:
         st.info(f"{title}: 데이터가 없습니다.")
@@ -193,7 +205,6 @@ def plot_lines(df: pd.DataFrame, title: str, height: int = 320, normalized: bool
     st.plotly_chart(fig, use_container_width=True)
 
 def link_button(label: str, url: str):
-    """Streamlit 버전에 따라 link_button이 없을 수 있어 폴백 제공"""
     if hasattr(st, "link_button"):
         st.link_button(label, url, use_container_width=True)
     else:
@@ -205,16 +216,12 @@ def link_button(label: str, url: str):
 @st.cache_data(ttl=60 * 30)
 def yf_close(symbol: str, start: str) -> pd.DataFrame:
     df = yf.download(symbol, start=start, progress=False, auto_adjust=False)
-
     if df is None or getattr(df, "empty", True):
         return pd.DataFrame()
-
     if isinstance(df.columns, pd.MultiIndex):
         df.columns = [c[0] for c in df.columns]
-
     if "Close" not in df.columns:
         return pd.DataFrame()
-
     return df[["Close"]].dropna()
 
 @st.cache_data(ttl=60 * 30)
@@ -241,22 +248,22 @@ def rss_items(url: str, limit: int = 25):
         })
     return out
 
-# (선택) yfinance Search 사용 가능하면 검색 지원
+def has_yf_search():
+    return getattr(yf, "Search", None) is not None
+
 def try_yf_search(query: str, max_results: int = 10):
+    """가능하면 yfinance.Search 사용, 아니면 빈 리스트."""
     results = []
     query = (query or "").strip()
     if not query:
         return results
+    Search = getattr(yf, "Search", None)
+    if Search is None:
+        return results
 
     try:
-        # yfinance 최신 버전에 존재할 수 있음
-        Search = getattr(yf, "Search", None)
-        if Search is None:
-            return results
         s = Search(query)
-        quotes = getattr(s, "quotes", None)
-        if not quotes:
-            return results
+        quotes = getattr(s, "quotes", None) or []
         for q in quotes[:max_results]:
             sym = q.get("symbol") or ""
             name = q.get("shortname") or q.get("longname") or q.get("name") or ""
@@ -267,11 +274,28 @@ def try_yf_search(query: str, max_results: int = 10):
     except Exception:
         return results
 
+def resolve_kr_by_6digit(ticker6: str):
+    """6자리 입력이면 .KS/.KQ를 시도해서 이름 추정(가능한 범위)."""
+    t = clean_ticker(ticker6)
+    if not re.fullmatch(r"\d{6}", t):
+        return None
+
+    # yfinance info는 느리거나 제한될 수 있음. 실패해도 안전하게 None 반환.
+    for suf in [".KS", ".KQ"]:
+        sym = f"{t}{suf}"
+        try:
+            info = yf.Ticker(sym).info
+            nm = info.get("longName") or info.get("shortName") or info.get("displayName")
+            if nm:
+                return {"symbol": sym, "name": nm, "exchange": "KRX"}
+        except Exception:
+            pass
+    return None
+
 # =========================
 # Session State: 관심종목(내 주식)
 # =========================
 if "watchlist" not in st.session_state:
-    # 기본 10개(원하시면 미샵 스타일로 바꿔드릴게요)
     st.session_state.watchlist = [
         {"name": "삼성전자", "ticker": "005930"},
         {"name": "SK하이닉스", "ticker": "000660"},
@@ -289,28 +313,62 @@ def watchlist_add(name: str, ticker: str):
     name = (name or "").strip()
     ticker = (ticker or "").strip()
     if not name or not ticker:
-        return
-    # 중복 방지 (티커 기준)
+        return "empty"
     for it in st.session_state.watchlist:
-        if clean_ticker(it.get("ticker","")) == clean_ticker(ticker):
-            return
+        if clean_ticker(it.get("ticker", "")) == clean_ticker(ticker):
+            return "dup"
     if len(st.session_state.watchlist) >= 10:
-        return
+        return "full"
     st.session_state.watchlist.append({"name": name, "ticker": ticker})
+    return "ok"
 
 def watchlist_remove(idx: int):
     if 0 <= idx < len(st.session_state.watchlist):
         st.session_state.watchlist.pop(idx)
 
 # =========================
-# Sidebar: 네비 + 설정 + 관심종목 관리(+/-)
+# Guide Content
+# =========================
+GUIDE_MD = """
+### 이 대시보드, 이렇게 보시면 됩니다
+
+#### 1) ‘일간/주간/월간’ 탭 차이
+- **일간(D)**: 최근 흐름(단기 변동, 뉴스 영향)을 빠르게 확인
+- **주간(W)**: 단기 노이즈를 줄이고 추세(스윙) 확인
+- **월간(M)**: 큰 사이클(중장기 방향) 확인
+
+#### 2) 정규화 100 그래프(가장 중요한 핵심)
+- 시작점을 **100으로 맞춰**서 “누가 더 강한지(상대수익률)”를 비교하는 방식입니다.
+- 120이면 시작 대비 **+20%**, 80이면 **-20%** 같은 의미예요.
+- 10대 기업/ETF 비교 그래프가 바로 이 방식입니다.
+
+#### 3) 주요 지표 뜻 (초간단)
+- **KOSPI/KOSDAQ**: 국내 시장 체력(대형/성장·중소형)
+- **S&P500/NASDAQ/DOW**: 미국 시장(빅테크/대형/전통)
+- **USD/KRW**: 환율. 원화 강/약 → 수입물가·외국인 수급에 영향
+- **Gold(금)**: 불안/인플레 헤지 성격
+- **WTI(유가)**: 경기·물가·금리 방향에 영향을 주는 원자재 핵심
+- **DXY(달러인덱스)**: 달러 힘. 강달러면 신흥국·위험자산에 부담이 되는 경우가 많음
+
+#### 4) 빠른 해석 팁(자주 쓰는 조합)
+- **DXY↑ + USD/KRW↑**: 강달러/원화약세 → 국내 주식에 부담일 때가 많음
+- **WTI↑**: 물가 압력/금리 부담이 커질 수 있음(업종별 영향 다름)
+- **Gold↑ + 주가지수↓**: 위험회피 분위기 가능성 체크
+
+#### 5) ‘내 관심종목’ 활용법
+- 관심종목을 **최대 10개**까지 등록해두고,
+- **KOSPI/KOSDAQ/미국 지수**와 ‘상대적인 강도’를 같이 보세요.
+- 강한 종목은 약세장에서도 덜 빠지거나 빨리 회복합니다.
+
+> 참고: 데이터는 무료 소스 특성상 간헐적으로 누락될 수 있어요.  
+> 그럴 땐 좌측 **‘지금 새로고침’**을 눌러주세요.
+"""
+
+# =========================
+# Sidebar: 메뉴 + 설정 + 관심종목 관리(+/-)
 # =========================
 st.sidebar.markdown("### 📌 메뉴")
-section = st.sidebar.radio(
-    "이동",
-    ["대시보드", "관심종목 관리"],
-    label_visibility="collapsed"
-)
+section = st.sidebar.radio("이동", ["대시보드", "관심종목 관리"], label_visibility="collapsed")
 
 st.sidebar.markdown("---")
 st.sidebar.markdown("### ⚙️ 설정")
@@ -331,41 +389,66 @@ if refresh_on:
 
 st.sidebar.markdown("---")
 
-# ✅ 좌측 탭: 관심종목 +/-
+# ✅ 좌측: 관심종목 +/− (검색 동작 확실히: form 사용)
 st.sidebar.markdown("### ⭐ 내 관심종목 (+ / -)")
-st.sidebar.caption("최대 10개까지. 검색/추가/삭제를 여기서 직관적으로 관리합니다.")
+st.sidebar.caption("최대 10개. 검색/추가/삭제를 여기서 직관적으로 관리합니다.")
 
-with st.sidebar.expander("➕ 종목 추가", expanded=True):
-    q = st.text_input("검색(회사명/티커)", value="", key="wl_search")
-    cols = st.columns([1, 1])
-    with cols[0]:
+with st.sidebar.expander("➕ 종목 검색/추가", expanded=True):
+    with st.form("watchlist_search_form", clear_on_submit=False):
+        q = st.text_input("검색(회사명/티커)", value="", key="wl_q")
         manual_name = st.text_input("이름(수동)", value="", key="wl_manual_name")
-    with cols[1]:
-        manual_ticker = st.text_input("티커(수동, 6자리)", value="", key="wl_manual_ticker")
+        manual_ticker = st.text_input("티커(수동, 6자리/심볼)", value="", key="wl_manual_ticker")
 
-    c1, c2 = st.columns([1, 1])
-    with c1:
-        if st.button("검색 결과 보기", use_container_width=True):
-            st.session_state._wl_results = try_yf_search(q, max_results=10)
-    with c2:
-        if st.button("수동 추가", use_container_width=True):
-            if len(st.session_state.watchlist) >= 10:
-                st.warning("관심종목은 최대 10개까지예요. 먼저 하나 삭제해 주세요.")
+        c1, c2 = st.columns(2)
+        search_submit = c1.form_submit_button("검색", use_container_width=True)
+        manual_submit = c2.form_submit_button("수동 추가", use_container_width=True)
+
+    # 검색 버튼 눌렀을 때
+    if search_submit:
+        st.session_state.wl_results = []
+        qq = (q or "").strip()
+
+        # 1) yfinance.Search 가능하면 사용
+        if has_yf_search() and qq:
+            st.session_state.wl_results = try_yf_search(qq, max_results=10)
+
+        # 2) Search가 없거나 결과가 없으면: 6자리 입력이면 .KS/.KQ 시도
+        if (not st.session_state.wl_results) and re.search(r"\d{6}", qq):
+            resolved = resolve_kr_by_6digit(qq)
+            if resolved:
+                st.session_state.wl_results = [resolved]
+
+    # 수동 추가 버튼 눌렀을 때
+    if manual_submit:
+        if len(st.session_state.watchlist) >= 10:
+            st.warning("관심종목은 최대 10개까지예요. 먼저 하나 삭제해 주세요.")
+        else:
+            nm = manual_name or q
+            tk = manual_ticker.strip()
+            # 6자리면 6자리로 저장(내부에서 KR 처리), 심볼이면 그대로
+            tk = clean_ticker(tk) if re.search(r"\d{6}", tk) else tk
+            res = watchlist_add(nm, tk)
+            if res == "dup":
+                st.info("이미 등록된 티커입니다.")
+            elif res == "empty":
+                st.warning("이름/티커를 입력해주세요.")
+            elif res == "full":
+                st.warning("관심종목은 최대 10개까지입니다.")
             else:
-                watchlist_add(manual_name or q, clean_ticker(manual_ticker))
-                st.rerun()
+                st.success("추가 완료!")
+            st.rerun()
 
-    # 검색 결과 표시 (+ 버튼)
-    results = st.session_state.get("_wl_results", [])
+    # 검색 결과 표시 (+)
+    results = st.session_state.get("wl_results", [])
+    if search_submit and not results:
+        st.caption("검색 결과가 없습니다. (환경에 따라 검색이 제한될 수 있어요) 아래 ‘수동 추가’를 사용해주세요.")
+
     if results:
-        st.markdown("**검색 결과 (클릭하면 +추가)**")
+        st.markdown("**검색 결과 (＋로 추가)**")
         for r in results:
-            label = f"{r.get('name','')} ({r.get('symbol','')})"
-            sym = r.get("symbol","")
-            # 한국 6자리 티커로도 넣을 수 있게 보조 처리
-            # (Search 결과가 005930.KS 형태일 수 있음)
-            m = re.search(r"(\d{6})", sym)
-            kr6 = m.group(1) if m else ""
+            sym = r.get("symbol", "")
+            name = r.get("name", "") or "(이름없음)"
+            label = f"{name} ({sym})"
             add_cols = st.columns([4, 1])
             with add_cols[0]:
                 st.caption(label)
@@ -374,15 +457,11 @@ with st.sidebar.expander("➕ 종목 추가", expanded=True):
                     if len(st.session_state.watchlist) >= 10:
                         st.warning("관심종목은 최대 10개까지예요. 먼저 하나 삭제해 주세요.")
                     else:
-                        # 우선 6자리면 6자리로 저장 (KR)
-                        if kr6:
-                            watchlist_add(r.get("name","(이름없음)"), kr6)
-                        else:
-                            # 해외주식/ETF도 가능하도록 심볼 그대로 저장
-                            watchlist_add(r.get("name","(이름없음)"), sym)
+                        # KR 6자리면 6자리로 저장, 아니면 심볼 그대로
+                        m = re.search(r"(\d{6})", sym)
+                        tk = m.group(1) if m else sym
+                        watchlist_add(name, tk)
                         st.rerun()
-    else:
-        st.caption("검색 기능은 yfinance 버전에 따라 결과가 없을 수 있어요. 그럴 땐 수동추가(이름/티커)로 넣어주세요.")
 
 st.sidebar.markdown("**현재 관심종목 (최대 10개)**")
 for i, it in enumerate(st.session_state.watchlist):
@@ -455,14 +534,40 @@ CHART_H = 260 if mobile else 340
 NEWS_COLS = 1 if mobile else 2
 
 # =========================
-# Header
+# Top header + Guide button (popup)
 # =========================
-st.title("재테크 핵심지표 대시보드")
-st.markdown(
-    '<div class="small">국내/미국 지수 · 국내 10대 기업 · 대표 ETF 10 · 환율/금/유가 · 내 관심종목 · 실시간 경제뉴스</div>',
-    unsafe_allow_html=True
-)
+left, right = st.columns([5, 1.3])
+with left:
+    st.title("재테크 핵심지표 대시보드")
+    st.markdown(
+        '<div class="small">국내/미국 지수 · 국내 10대 기업 · 대표 ETF 10 · 환율/금/유가 · 내 관심종목 · 실시간 경제뉴스</div>',
+        unsafe_allow_html=True
+    )
+with right:
+    st.write("")
+    st.write("")
+    if st.button("활용법 가이드", use_container_width=True):
+        st.session_state.show_guide = True
+
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+
+# ✅ dialog가 있으면 진짜 팝업으로, 없으면 페이지 상단에 안내 박스로 표시
+if st.session_state.get("show_guide", False):
+    if hasattr(st, "dialog"):
+        @st.dialog("활용법 가이드")
+        def _guide_dialog():
+            st.markdown(GUIDE_MD)
+            if st.button("닫기"):
+                st.session_state.show_guide = False
+                st.rerun()
+        _guide_dialog()
+    else:
+        with st.container():
+            st.info("이 Streamlit 버전에서는 팝업 대신 상단에 표시됩니다.")
+            st.markdown(GUIDE_MD)
+            if st.button("가이드 닫기"):
+                st.session_state.show_guide = False
+                st.rerun()
 
 # =========================
 # Render Sections
@@ -470,7 +575,6 @@ st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 def render_overview(freq: str, start: str):
     st.subheader("요약 스냅샷")
     cols = st.columns(KPI_COLS)
-
     kpi_defs = [
         ("KOSPI", "^KS11", "", 2),
         ("KOSDAQ", "^KQ11", "", 2),
@@ -481,7 +585,6 @@ def render_overview(freq: str, start: str):
         ("WTI", "CL=F", "", 2),
         ("DXY (달러인덱스)", "DX-Y.NYB", "", 2),
     ]
-
     for i, (title, sym, suffix, prec) in enumerate(kpi_defs):
         with cols[i % KPI_COLS]:
             base = yf_close(sym, start)
@@ -491,7 +594,6 @@ def render_overview(freq: str, start: str):
 
 def render_indices(freq: str, start: str):
     st.subheader("주요 주가지수")
-
     kr = {}
     for name, sym in [("KOSPI", "^KS11"), ("KOSDAQ", "^KQ11")]:
         d = resample_close(yf_close(sym, start), freq)
@@ -521,7 +623,6 @@ def render_top10_companies(freq: str, start: str):
         d = resample_close(yf_close_kr(ticker, start), freq)
         if not d.empty:
             prices[name] = d["Close"]
-
     if prices:
         plot_lines(pd.DataFrame(prices), "KR Top10 Companies (정규화=100)", height=CHART_H + 40, normalized=True)
     else:
@@ -534,7 +635,6 @@ def render_etf10(freq: str, start: str):
         d = resample_close(yf_close_kr(ticker, start), freq)
         if not d.empty:
             prices[name] = d["Close"]
-
     if prices:
         plot_lines(pd.DataFrame(prices), "KR ETF10 (정규화=100)", height=CHART_H + 40, normalized=True)
     else:
@@ -542,13 +642,12 @@ def render_etf10(freq: str, start: str):
 
 def render_fx_gold_oil(freq: str, start: str):
     st.subheader("환율 · 금 · 유가")
-
     series = [
         ("USD/KRW", "KRW=X", 4),
         ("Gold", "GC=F", 2),
         ("WTI", "CL=F", 2),
+        ("DXY (달러인덱스)", "DX-Y.NYB", 2),
     ]
-
     cols = st.columns(KPI_COLS)
     for i, (title, sym, prec) in enumerate(series):
         with cols[i % KPI_COLS]:
@@ -564,15 +663,16 @@ def render_watchlist(freq: str, start: str):
         st.info("관심종목이 비어있어요. 좌측에서 +로 추가해 주세요.")
         return
 
-    # KPI 카드(최대 10개라 모바일이면 2열/데스크톱이면 4열)
     cols = st.columns(KPI_COLS)
     series = {}
     for i, it in enumerate(wl):
         name = it["name"]
         tick = it["ticker"]
+        if re.fullmatch(r"\d{6}", clean_ticker(tick)):
+            base = yf_close_kr(tick, start)
+        else:
+            base = yf_close(tick, start)
 
-        # 6자리면 KR 종목/ETF 처리, 아니면 심볼 그대로(해외 가능)
-        base = yf_close_kr(tick, start) if re.fullmatch(r"\d{6}", clean_ticker(tick)) else yf_close(tick, start)
         df = resample_close(base, freq)
         last, delta, pct = metric(df)
 
@@ -582,7 +682,6 @@ def render_watchlist(freq: str, start: str):
         if not df.empty:
             series[name] = df["Close"]
 
-    # 정규화 비교 차트
     if series:
         plot_lines(pd.DataFrame(series), "관심종목 (정규화=100)", height=CHART_H + 40, normalized=True)
 
@@ -591,16 +690,15 @@ def render_econ_shortcuts():
     links = [
         ("한국은행 ECOS", "https://ecos.bok.or.kr/"),
         ("통계청 KOSIS", "https://kosis.kr/"),
-        ("기획재정부(보도자료)", "https://www.moef.go.kr/"),
+        ("기획재정부", "https://www.moef.go.kr/"),
         ("금융위원회", "https://www.fsc.go.kr/"),
         ("금융감독원", "https://www.fss.or.kr/"),
         ("한국거래소(KRX)", "https://www.krx.co.kr/"),
-        ("국가통계포털 e-나라지표", "https://www.index.go.kr/"),
-        ("연합인포맥스", "https://news.einfomax.co.kr/"),
+        ("e-나라지표", "https://www.index.go.kr/"),
         ("네이버 금융", "https://finance.naver.com/"),
-        ("FRED(미국 주요지표)", "https://fred.stlouisfed.org/"),
+        ("연합인포맥스", "https://news.einfomax.co.kr/"),
+        ("FRED(미국 지표)", "https://fred.stlouisfed.org/"),
     ]
-    # 모바일: 2열, 데스크톱: 5열
     cols_n = 2 if mobile else 5
     cols = st.columns(cols_n)
     for i, (label, url) in enumerate(links[:10]):
@@ -609,8 +707,6 @@ def render_econ_shortcuts():
 
 def render_news():
     st.subheader("실시간 경제 뉴스")
-
-    # ✅ 요청사항 1: 뉴스 위에 바로가기 버튼 10개
     render_econ_shortcuts()
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
@@ -675,85 +771,42 @@ def render_tab(freq: str):
     render_fx_gold_oil(freq, start)
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
-    # ✅ 요청사항 2: 관심종목 보기 섹션 추가
     render_watchlist(freq, start)
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     render_news()
-    st.caption("※ 무료 데이터 소스 특성상 간헐적 누락이 있을 수 있어요. 그럴 땐 ‘지금 새로고침’을 눌러주세요.")
-
-st.markdown("---")
-st.caption("© 미샵컴퍼니(MISHARP COMPANY). 무단 전재·복사·배포를 금합니다.")
-st.caption("© MISHARP COMPANY. Unauthorized reproduction, copying, or distribution is prohibited.")
+    st.caption("※ 무료 데이터 소스 특성상 간헐적 누락이 있을 수 있어요. 그럴 땐 좌측 ‘지금 새로고침’을 눌러주세요.")
 
 def render_watchlist_manager_page():
     st.subheader("관심종목 관리")
     st.write("좌측 사이드바에서도 +/−로 관리할 수 있고, 여기서 한 번에 정리할 수도 있어요.")
 
     wl = st.session_state.watchlist[:10]
-    if not wl:
-        st.info("관심종목이 비어있어요. 좌측에서 +로 추가해 주세요.")
-        return
-
-    # 테이블 + 삭제 버튼
-    df = pd.DataFrame(wl)
-    df.index = np.arange(1, len(df) + 1)
-    st.dataframe(df, use_container_width=True)
-
-    st.markdown("**삭제(−)**")
-    for i, it in enumerate(wl):
-        cols = st.columns([4, 1])
-        with cols[0]:
-            st.write(f"{i+1}. {it['name']} · {it['ticker']}")
-        with cols[1]:
-            if st.button("－ 삭제", key=f"rm_page_{i}", use_container_width=True):
-                watchlist_remove(i)
-                st.rerun()
+    df = pd.DataFrame(wl) if wl else pd.DataFrame(columns=["name", "ticker"])
+    if not df.empty:
+        df.index = np.arange(1, len(df) + 1)
+        st.dataframe(df, use_container_width=True)
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
-    st.markdown("**추가(+)**")
-    st.caption("검색 결과가 안 나오면 ‘수동 추가’를 사용하세요. (예: 삼성전자 005930)")
-    q = st.text_input("검색(회사명/티커)", value="", key="wl_page_search")
-    if st.button("검색", use_container_width=True):
-        st.session_state._wl_page_results = try_yf_search(q, max_results=10)
+    st.markdown("좌측 ‘➕ 종목 검색/추가’에서 검색/추가/삭제를 진행해주세요. (여기서는 보기만 제공합니다.)")
 
-    results = st.session_state.get("_wl_page_results", [])
-    if results:
-        for r in results:
-            sym = r.get("symbol", "")
-            name = r.get("name", "")
-            m = re.search(r"(\d{6})", sym)
-            kr6 = m.group(1) if m else ""
-            cols = st.columns([5, 1])
-            with cols[0]:
-                st.write(f"{name} ({sym})")
-            with cols[1]:
-                if st.button("＋ 추가", key=f"add_page_{sym}", use_container_width=True):
-                    if len(st.session_state.watchlist) >= 10:
-                        st.warning("관심종목은 최대 10개까지예요. 먼저 하나 삭제해 주세요.")
-                    else:
-                        watchlist_add(name or "(이름없음)", kr6 if kr6 else sym)
-                        st.rerun()
-    else:
-        st.caption("검색 결과가 없으면 아래 수동 추가를 사용하세요.")
-
-    c1, c2 = st.columns(2)
-    with c1:
-        nm = st.text_input("이름(수동)", value="", key="wl_page_manual_name")
-    with c2:
-        tk = st.text_input("티커(수동, 6자리/심볼)", value="", key="wl_page_manual_ticker")
-    if st.button("수동 추가", use_container_width=True):
-        if len(st.session_state.watchlist) >= 10:
-            st.warning("관심종목은 최대 10개까지예요. 먼저 하나 삭제해 주세요.")
-        else:
-            watchlist_add(nm or q, clean_ticker(tk))
-            st.rerun()
+# =========================
+# Footer
+# =========================
+def render_footer():
+    st.markdown("""
+<div class="footer">
+  © 미샵컴퍼니(MISHARP COMPANY). 무단 전재·복사·배포를 금합니다.<br/>
+  © MISHARP COMPANY. Unauthorized reproduction, copying, or distribution is prohibited.
+</div>
+""", unsafe_allow_html=True)
 
 # =========================
 # Run
 # =========================
 if section == "관심종목 관리":
     render_watchlist_manager_page()
+    render_footer()
 else:
     tabs = st.tabs(["일간", "주간", "월간"])
     with tabs[0]:
@@ -762,3 +815,4 @@ else:
         render_tab("W")
     with tabs[2]:
         render_tab("M")
+    render_footer()
