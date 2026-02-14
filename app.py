@@ -47,8 +47,6 @@ h1 { font-size:1.75rem !important; font-weight:800; line-height:1.25 !important;
   color:rgba(0,0,0,.55);
   padding:18px 0 6px 0;
 }
-
-.smallbtn .stButton>button{ border-radius:14px; padding:.55rem .75rem; }
 </style>
 """, unsafe_allow_html=True)
 
@@ -56,9 +54,6 @@ h1 { font-size:1.75rem !important; font-weight:800; line-height:1.25 !important;
 # Utils
 # =========================
 def now(): return datetime.now()
-
-def is_korean_text(s: str) -> bool:
-    return bool(re.search(r"[가-힣]", s or ""))
 
 def clean_ticker_6(s: str) -> str | None:
     m = re.search(r"(\d{6})", (s or "").strip())
@@ -166,20 +161,16 @@ def get_start(freq: str) -> str:
     return (now() - timedelta(days=day)).strftime("%Y-%m-%d")
 
 # =========================
-# Sidebar (간단/정돈)
+# Sidebar
 # =========================
 st.sidebar.markdown("### ⚙ 설정")
 freq_label = st.sidebar.radio("보기 단위", ["일간", "주간", "월간"], index=0)
 freq = {"일간":"D", "주간":"W", "월간":"M"}[freq_label]
-
 news_n = st.sidebar.slider("뉴스 표시 개수", 5, 50, 20, step=5)
 keyword = st.sidebar.text_input("뉴스 키워드 필터(선택)", value="")
 
-st.sidebar.markdown("---")
-st.sidebar.markdown("### ⭐ 관심종목 (한글 검색 지원)")
-
 # =========================
-# KRX Listing for Korean Search
+# KRX Listing for Korean Search (관심종목)
 # =========================
 @st.cache_data(ttl=60*60*24)
 def krx_listings():
@@ -217,9 +208,6 @@ def search_krx(query: str, limit=20) -> pd.DataFrame:
     hit = KRX[KRX["Name"].str.contains(q, case=False, na=False)]
     return hit.head(limit)
 
-# =========================
-# Watchlist state
-# =========================
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
 
@@ -239,6 +227,8 @@ def remove_watch(i):
     if 0 <= i < len(st.session_state.watchlist):
         st.session_state.watchlist.pop(i)
 
+st.sidebar.markdown("---")
+st.sidebar.markdown("### ⭐ 관심종목 (한글 검색 지원)")
 with st.sidebar.form("kr_search_form"):
     q = st.text_input("회사명/ETF명/6자리 티커", value="")
     do = st.form_submit_button("검색")
@@ -265,7 +255,6 @@ if isinstance(results, pd.DataFrame) and not results.empty:
 elif do:
     st.sidebar.info("검색 결과가 없습니다. 정확한 회사명으로 다시 시도해보세요.")
 
-st.sidebar.markdown("---")
 st.sidebar.markdown("**현재 관심종목**")
 for i, it in enumerate(st.session_state.watchlist):
     cols = st.sidebar.columns([4,1])
@@ -285,7 +274,7 @@ if st.sidebar.button("지금 새로고침"):
 l, r = st.columns([5, 1.4])
 with l:
     st.title("재테크 핵심지표 대시보드")
-    st.markdown('<div class="small">시장 한눈에 → 국내 Top10/ETF10 → 내 관심종목 → 부동산(주간) → 경제뉴스</div>', unsafe_allow_html=True)
+    st.markdown('<div class="small">시장 한눈에 → 국내 Top10/ETF10 → 내 관심종목 → 부동산(KOSIS) → 경제뉴스</div>', unsafe_allow_html=True)
 with r:
     if st.button("활용법 가이드", use_container_width=True):
         st.session_state.show_guide = True
@@ -299,7 +288,7 @@ if st.session_state.get("show_guide", False):
 - **정규화 100**: 시작점을 100으로 맞춰 “상대 강도” 비교  
 - **USD/KRW, DXY**: 달러 강세/원화 약세 압력 체크  
 - **Gold, WTI**: 인플레/원자재 사이클 확인  
-- **부동산(주간)**: 주식 대비 후행일 수 있어, 흐름 확인용으로 활용  
+- **부동산(KOSIS)**: 표/항목(tblId/itmId)에 따라 주기(M/W) 다름 → Secrets로 제어  
 """)
             if st.button("닫기"):
                 st.session_state.show_guide = False
@@ -314,7 +303,7 @@ if st.session_state.get("show_guide", False):
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
 # =========================
-# Data fetch wrappers
+# Default lists
 # =========================
 def kr_yf_series(code6: str, start: str) -> pd.Series:
     s = yf_close(f"{code6}.KS", start)
@@ -335,9 +324,9 @@ KR_ETF10_DEFAULT = [
 ]
 
 # =========================
-# Tabs (정돈된 흐름)
+# Tabs
 # =========================
-tabs = st.tabs(["시장 한눈에", "국내 Top10/ETF10", "내 관심종목", "부동산(주간)"])
+tabs = st.tabs(["시장 한눈에", "국내 Top10/ETF10", "내 관심종목", "부동산(KOSIS)"])
 
 # --------- TAB 1: Market Overview
 with tabs[0]:
@@ -361,7 +350,6 @@ with tabs[0]:
             gold_kr_1don = aligned.iloc[:, 0] * aligned.iloc[:, 1] * (3.75 / 31.1035)
 
     st.markdown('<div class="section-title">요약 스냅샷</div>', unsafe_allow_html=True)
-    # ✅ 3열 카드 배치(보기 좋게)
     row1 = st.columns(3)
     with row1[0]: kpi_card("KOSPI", f"{kospi.iloc[-1]:,.1f}" if not kospi.empty else "-", "pt", kpi_delta(kospi), precision=1)
     with row1[1]: kpi_card("KOSDAQ", f"{kosdaq.iloc[-1]:,.1f}" if not kosdaq.empty else "-", "pt", kpi_delta(kosdaq), precision=1)
@@ -380,17 +368,10 @@ with tabs[0]:
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
     st.markdown('<div class="section-title">주요 지수 추세 (정규화 100)</div>', unsafe_allow_html=True)
-    df_k = pd.DataFrame({
-        "KOSPI": normalize_100(kospi),
-        "KOSDAQ": normalize_100(kosdaq)
-    }).dropna(how="all")
+    df_k = pd.DataFrame({"KOSPI": normalize_100(kospi), "KOSDAQ": normalize_100(kosdaq)}).dropna(how="all")
     plot_df(df_k, "KOSPI vs KOSDAQ (정규화 100)", height=340)
 
-    df_u = pd.DataFrame({
-        "S&P500": normalize_100(spx),
-        "NASDAQ": normalize_100(nas),
-        "DOW": normalize_100(dow)
-    }).dropna(how="all")
+    df_u = pd.DataFrame({"S&P500": normalize_100(spx), "NASDAQ": normalize_100(nas), "DOW": normalize_100(dow)}).dropna(how="all")
     plot_df(df_u, "US Indices (정규화 100)", height=340)
 
     st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
@@ -437,75 +418,170 @@ with tabs[2]:
                 series[it["name"]] = normalize_100(s)
         plot_df(pd.DataFrame(series).dropna(how="all"), "내 관심종목 (정규화 100)", height=420)
 
-# --------- TAB 4: Real Estate (KOSIS)
-KOSIS_ORG_ID_DEFAULT = st.secrets.get("KOSIS_ORG_ID", "408")
-KOSIS_TBL_ID_DEFAULT = st.secrets.get("KOSIS_TBL_ID", "DT_304004_WEEK_002_A")
-KOSIS_ITM_ID_DEFAULT = st.secrets.get("KOSIS_ITM_ID", "T1")
-REGION_CODES_DEFAULT = {"서울": "11", "부산": "21", "대구": "22", "경기": "31"}
+# =========================
+# TAB 4: KOSIS Real Estate (에러 방지 버전)
+# =========================
+def _pick_value_col(df: pd.DataFrame):
+    for c in ["DT", "DATA_VALUE", "VALUE", "VAL"]:
+        if c in df.columns:
+            return c
+    return None
+
+def _pick_date_col(df: pd.DataFrame):
+    for c in ["PRD_DE", "TIME", "PRD_DE_NM", "PRD_DE_CODE"]:
+        if c in df.columns:
+            return c
+    return None
 
 @st.cache_data(ttl=60*60*6)
-def kosis_weekly_apt_sale_index(api_key: str, weeks: int = 260):
+def kosis_fetch_all(api_key: str, org_id: str, tbl_id: str, itm_id: str, prd_se: str, new_cnt: int = 60):
+    """
+    objL1=ALL 로 1회 호출 → DataFrame 리턴
+    어떤 형태로 오든(에러 dict/빈 리스트) 절대 크래시 안 나게 처리
+    """
     base_url = "https://kosis.kr/openapi/Param/statisticsParameterData.do"
-    out = {}
-    for name, code in REGION_CODES_DEFAULT.items():
-        params = {
-            "method": "getList",
-            "apiKey": api_key,
-            "orgId": KOSIS_ORG_ID_DEFAULT,
-            "tblId": KOSIS_TBL_ID_DEFAULT,
-            "itmId": KOSIS_ITM_ID_DEFAULT,
-            "objL1": code,
-            "format": "json",
-            "jsonVD": "Y",
-            "prdSe": "W",
-            "loadGubun": "2",
-            "newEstPrdCnt": str(weeks),
-        }
-        r = requests.get(base_url, params=params, timeout=20)
-        try:
-            data = r.json()
-        except Exception:
-            out[name] = pd.Series(dtype="float64")
-            continue
-        if not isinstance(data, list):  # 에러 dict 방지
-            out[name] = pd.Series(dtype="float64")
-            continue
-        df = pd.DataFrame(data)
-        if df.empty or "PRD_DE" not in df.columns:
-            out[name] = pd.Series(dtype="float64")
-            continue
-        val_col = "DT" if "DT" in df.columns else ("DATA_VALUE" if "DATA_VALUE" in df.columns else None)
-        if val_col is None:
-            out[name] = pd.Series(dtype="float64")
-            continue
-        idx = pd.to_datetime(df["PRD_DE"].astype(str), errors="coerce", format="%Y%m%d")
-        s = pd.to_numeric(df[val_col], errors="coerce")
-        s.index = idx
-        out[name] = s.dropna().sort_index()
-    return pd.DataFrame(out).dropna(how="all")
+    params = {
+        "method": "getList",
+        "apiKey": api_key,
+        "orgId": org_id,
+        "tblId": tbl_id,
+        "itmId": itm_id,
+        "objL1": "ALL",
+        "objL2": "ALL",
+        "format": "json",
+        "jsonVD": "Y",
+        "prdSe": prd_se,
+        "newEstPrdCnt": str(new_cnt),
+        "loadGubun": "2",
+    }
+    try:
+        r = requests.get(base_url, params=params, timeout=25)
+    except Exception:
+        return pd.DataFrame(), "request_error"
+
+    try:
+        data = r.json()
+    except Exception:
+        return pd.DataFrame(), "json_error"
+
+    # 에러가 dict로 오는 경우가 있음
+    if isinstance(data, dict):
+        return pd.DataFrame(), f"api_error: {str(data)[:180]}"
+
+    if not isinstance(data, list) or len(data) == 0:
+        return pd.DataFrame(), "empty"
+
+    df = pd.DataFrame(data)
+    return df, "ok"
+
+def kosis_to_timeseries(df_raw: pd.DataFrame):
+    """
+    KOSIS raw를 (날짜 index) x (지역명 columns) 형태로 변환
+    obj명이 들어있는 컬럼을 자동 탐색
+    """
+    if df_raw is None or df_raw.empty:
+        return pd.DataFrame()
+
+    # 날짜 컬럼
+    date_col = _pick_date_col(df_raw)
+    if date_col is None:
+        return pd.DataFrame()
+
+    # 값 컬럼
+    val_col = _pick_value_col(df_raw)
+    if val_col is None:
+        return pd.DataFrame()
+
+    # 지역명 컬럼(대개 C1_NM 또는 OBJ_NM 류)
+    name_cols = [c for c in df_raw.columns if c.endswith("_NM") or c in ["OBJ_NM", "C1_NM", "C2_NM", "C3_NM"]]
+    region_col = None
+    for c in ["C1_NM", "OBJ_NM"]:
+        if c in df_raw.columns:
+            region_col = c
+            break
+    if region_col is None and len(name_cols) > 0:
+        region_col = name_cols[0]  # 가장 가능성 높은 NM 사용
+
+    if region_col is None:
+        return pd.DataFrame()
+
+    # 날짜 파싱: PRD_DE가 yyyymm 혹은 yyyymmdd 일 수 있음
+    sdate = df_raw[date_col].astype(str).str.strip()
+    # 길이에 따라 파싱
+    def parse_dt(x):
+        x = re.sub(r"[^0-9]", "", x)
+        if len(x) == 6:
+            return pd.to_datetime(x, format="%Y%m", errors="coerce")
+        if len(x) == 8:
+            return pd.to_datetime(x, format="%Y%m%d", errors="coerce")
+        return pd.to_datetime(x, errors="coerce")
+
+    idx = sdate.apply(parse_dt)
+    vals = pd.to_numeric(df_raw[val_col], errors="coerce")
+    reg = df_raw[region_col].astype(str)
+
+    temp = pd.DataFrame({"date": idx, "region": reg, "value": vals}).dropna()
+    if temp.empty:
+        return pd.DataFrame()
+
+    pivot = temp.pivot_table(index="date", columns="region", values="value", aggfunc="last").sort_index()
+    return pivot
 
 with tabs[3]:
-    st.markdown('<div class="section-title">주간 아파트 매매가격지수 (서울 · 부산 · 대구 · 경기)</div>', unsafe_allow_html=True)
-    st.caption("출처: KOSIS OpenAPI (선택1)")
+    st.markdown('<div class="section-title">부동산 지표 (KOSIS) — 형준님 URL 기반</div>', unsafe_allow_html=True)
+    st.caption("표/항목/주기(prdSe)는 Secrets 값으로 동작합니다. (objL1=ALL 1회 호출)")
 
     api_key = st.secrets.get("KOSIS_API_KEY", "").strip()
-    if not api_key:
-        st.info("KOSIS_API_KEY가 설정되지 않아 부동산 지표는 표시되지 않습니다. (다른 탭은 정상)")
+    org_id = st.secrets.get("KOSIS_ORG_ID", "408").strip()
+    tbl_id = st.secrets.get("KOSIS_TBL_ID", "").strip()
+    itm_id = st.secrets.get("KOSIS_ITM_ID", "").strip()
+    prd_se = st.secrets.get("KOSIS_PRD_SE", "M").strip()  # 형준님 URL: M
+
+    # itmId에 '+' 같은 것이 들어갈 수 있어 정리
+    itm_id = itm_id.replace("+", "").strip()
+
+    if not api_key or not tbl_id or not itm_id:
+        st.info("Secrets에 KOSIS_API_KEY / KOSIS_TBL_ID / KOSIS_ITM_ID 가 필요합니다.")
     else:
-        df = kosis_weekly_apt_sale_index(api_key=api_key)
-        if df.empty:
+        df_raw, status = kosis_fetch_all(
+            api_key=api_key,
+            org_id=org_id,
+            tbl_id=tbl_id,
+            itm_id=itm_id,
+            prd_se=prd_se,
+            new_cnt=60
+        )
+
+        if status != "ok" or df_raw.empty:
             st.warning("부동산 데이터 호출은 실패했습니다. (다른 탭/기능은 정상)")
-            st.info("KOSIS URL보기에서 tblId/itmId를 확인 후 Secrets에 KOSIS_TBL_ID / KOSIS_ITM_ID를 넣어주세요.")
+            st.info(f"확인: orgId={org_id}, tblId={tbl_id}, itmId={itm_id}, prdSe={prd_se} / 상태={status}")
+            st.info("KOSIS URL에서 tblId/itmId/prdSe(M/W)를 다시 확인해 주세요.")
         else:
-            norm = df.apply(normalize_100)
-            plot_df(norm, "주간 아파트 매매가격지수 (정규화 100)", height=420)
-            with st.expander("원자료(최근 30개)"):
-                st.dataframe(df.tail(30), use_container_width=True)
+            ts = kosis_to_timeseries(df_raw)
+
+            if ts.empty:
+                st.warning("KOSIS 응답은 받았지만 시계열 변환에 실패했습니다.")
+                st.info("이 경우 해당 표의 컬럼명이 일반형식(C1_NM/PRD_DE/DT)이 아닐 수 있어요. raw를 열어 확인해야 합니다.")
+                with st.expander("raw 데이터 확인(상위 50행)"):
+                    st.dataframe(df_raw.head(50), use_container_width=True)
+            else:
+                # 너무 많은 지역이 있으면 사용자 선택
+                cols = list(ts.columns)
+                default_pick = [c for c in cols if any(k in c for k in ["서울", "부산", "대구", "경기"])]
+                pick = st.multiselect("표시할 지역 선택", options=cols, default=default_pick[:8] if default_pick else cols[:8])
+
+                view = ts[pick] if pick else ts
+                norm = view.apply(normalize_100)
+
+                plot_df(norm, f"KOSIS 부동산 지표 (정규화 100) · prdSe={prd_se}", height=420)
+
+                with st.expander("원자료(최근 30개)"):
+                    st.dataframe(view.tail(30), use_container_width=True)
 
 st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
 
 # =========================
-# Bottom: Shortcuts + News (요청대로 하단 배치)
+# Bottom: Shortcuts + News
 # =========================
 st.markdown("### 🔎 국내 주요경제지표 바로가기")
 btn_cols = st.columns(5)
