@@ -9,7 +9,7 @@ import feedparser
 import yfinance as yf
 import plotly.graph_objects as go
 
-# FinanceDataReader는 "있으면 쓰고, 없으면/막히면 우회"로 처리
+# FinanceDataReader는 "있으면 쓰고, 실패하면 우회"로만 사용
 try:
     import FinanceDataReader as fdr
     HAS_FDR = True
@@ -229,12 +229,11 @@ keyword = st.sidebar.text_input("뉴스 키워드 필터(선택)", value="")
 
 
 # =========================================================
-# ✅ 한글 종목검색: 네이버 금융 검색(HTML) 우회 (FDR 불안정 대비)
+# ✅ 한글 종목검색: 네이버 금융 검색(HTML)
 # =========================================================
 NAVER_SEARCH_URL = "https://finance.naver.com/search/searchList.naver"
 
 def naver_search(query: str, limit=15):
-    """네이버 금융 검색: (이름, 6자리코드, 타입추정) 리스트 반환"""
     q = (query or "").strip()
     if not q:
         return []
@@ -250,11 +249,10 @@ def naver_search(query: str, limit=15):
     except Exception:
         return []
 
-    # 코드 패턴: /item/main.naver?code=005930
+    # 코드 추출
     items = []
     for m in re.finditer(r"/item/main\.naver\?code=(\d{6})", html):
-        code = m.group(1)
-        items.append(code)
+        items.append(m.group(1))
 
     # 중복 제거
     codes = []
@@ -264,18 +262,13 @@ def naver_search(query: str, limit=15):
             seen.add(c)
             codes.append(c)
 
-    # 이름 추출(간단 파싱): 코드 주변 링크 텍스트를 찾는다
     results = []
     for code in codes[:limit*2]:
-        # <a href="/item/main.naver?code=005930">삼성전자</a> 형태를 찾음
         mm = re.search(rf'/item/main\.naver\?code={code}[^>]*>\s*([^<]+)\s*<', html)
         name = mm.group(1).strip() if mm else code
-
-        # ETF 추정: 이름에 KODEX/TIGER/KBSTAR/ARIRANG/RIZE 등
         typ = "ETF" if re.search(r"(KODEX|TIGER|KBSTAR|ARIRANG|RISE|HANARO|SOL)", name, re.IGNORECASE) else "STOCK"
         results.append({"Name": name, "Code": code, "Type": typ})
 
-    # 정렬: (정확일치 > 시작 > 포함) + STOCK 우선
     q0 = q
     def score(x):
         nm = x["Name"]
@@ -287,7 +280,6 @@ def naver_search(query: str, limit=15):
         return (ms, ts, nm)
 
     results = sorted(results, key=score)
-    # 상위 limit
     return results[:limit]
 
 
@@ -296,8 +288,15 @@ def naver_search(query: str, limit=15):
 # =========================================================
 if "watchlist" not in st.session_state:
     st.session_state.watchlist = []
+
+# ✅ 세션에 DataFrame이 남아있어도 안전하게 list로 정리
 if "kr_results" not in st.session_state:
     st.session_state.kr_results = []
+else:
+    if isinstance(st.session_state.kr_results, pd.DataFrame):
+        st.session_state.kr_results = st.session_state.kr_results.to_dict("records")
+    elif st.session_state.kr_results is None:
+        st.session_state.kr_results = []
 
 def add_watch(name, code6):
     code6 = (code6 or "").strip()
@@ -327,27 +326,39 @@ if do:
     q = (q or "").strip()
     t6 = clean_ticker_6(q)
     if t6:
-        # 6자리면 바로
         st.session_state.kr_results = [{"Name": t6, "Code": t6, "Type": "STOCK"}]
     else:
-        # ✅ 한글은 네이버 우선
-        if is_hangul(q):
-            st.session_state.kr_results = naver_search(q, limit=15)
-        else:
-            # 영문은 네이버로도 되고, 그냥 네이버로 통일
-            st.session_state.kr_results = naver_search(q, limit=15)
+        st.session_state.kr_results = naver_search(q, limit=15)
 
 results = st.session_state.kr_results
-if results:
+
+# ✅ results가 DataFrame/list 어떤 형태든 안전하게 처리
+has_results = False
+if isinstance(results, pd.DataFrame):
+    has_results = not results.empty
+    results = results.to_dict("records")
+elif isinstance(results, list):
+    has_results = len(results) > 0
+elif results is None:
+    has_results = False
+else:
+    try:
+        has_results = len(results) > 0
+    except Exception:
+        has_results = False
+
+if has_results:
     st.sidebar.markdown("**검색 결과**")
     for row in results:
-        code = row["Code"]
-        nm = row["Name"]
-        typ = row.get("Type", "")
+        code = row.get("Code") or row.get("code") or ""
+        nm = row.get("Name") or row.get("name") or code
+        typ = row.get("Type") or row.get("type") or ""
+
         cols = st.sidebar.columns([4, 1])
         with cols[0]:
             st.sidebar.write(f"{nm} ({code})")
-            st.sidebar.caption(typ)
+            if typ:
+                st.sidebar.caption(typ)
         with cols[1]:
             if st.sidebar.button("＋", key=f"add_{code}"):
                 res = add_watch(nm, code)
@@ -567,12 +578,11 @@ with tabs[2]:
 
 
 # =========================================================
-# Tab 3: 부동산(KOSIS) — ✅ 무한 로딩 방지 버전
+# Tab 3: 부동산(KOSIS) — 무한 로딩 방지
 # =========================================================
 KOSIS_URL = "https://kosis.kr/openapi/Param/statisticsParameterData.do"
 
 def kosis_request(params, timeout=10, retries=1):
-    """실패하면 즉시 반환(무한로딩 방지). User-Agent 필수."""
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36",
         "Accept": "application/json,text/plain,*/*",
@@ -607,7 +617,6 @@ def pick_cols(df):
     nm_cols = [c for c in df.columns if c.endswith("_NM") or c in ["OBJ_NM", "C1_NM", "C2_NM", "C3_NM"]]
     return date_col, val_col, nm_cols
 
-# 캐시/쿨다운(중요)
 if "kosis_cache_df" not in st.session_state:
     st.session_state.kosis_cache_df = None
 if "kosis_cache_time" not in st.session_state:
@@ -638,11 +647,9 @@ with tabs[3]:
     status = st.empty()
     chart_box = st.empty()
 
-    # Secrets 미설정
     if not api_key or not tbl_id or not itm_id:
         status.warning("Secrets에 KOSIS_API_KEY / KOSIS_TBL_ID / KOSIS_ITM_ID 가 필요합니다.")
     else:
-        # 쿨다운 체크
         if fetch:
             if st.session_state.kosis_last_fail_time and (now() - st.session_state.kosis_last_fail_time).total_seconds() < 180:
                 status.warning("방금 실패해서 잠시(약 3분) 후 다시 시도해주세요. (무한로딩 방지)")
@@ -694,7 +701,6 @@ with tabs[3]:
                     st.session_state.kosis_last_fail_msg = None
                     status.success("호출 성공 ✅ (마지막 성공 데이터를 캐시해 계속 표시합니다.)")
 
-        # ✅ 캐시가 있으면 항상 보여주기
         df0 = st.session_state.kosis_cache_df
         if st.session_state.kosis_cache_time:
             st.caption(f"마지막 성공 업데이트: {st.session_state.kosis_cache_time.strftime('%Y-%m-%d %H:%M:%S')}")
