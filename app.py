@@ -99,7 +99,6 @@ def yf_close(symbol: str, start: str) -> pd.Series:
     if df is None or df.empty:
         return pd.Series(dtype="float64")
 
-    # MultiIndex 대응
     if isinstance(df.columns, pd.MultiIndex):
         try:
             c = df["Close"]
@@ -288,7 +287,7 @@ if st.session_state.get("show_guide", False):
 - **정규화 100**: 시작점을 100으로 맞춰 “상대 강도” 비교  
 - **USD/KRW, DXY**: 달러 강세/원화 약세 압력 체크  
 - **Gold, WTI**: 인플레/원자재 사이클 확인  
-- **부동산(KOSIS)**: 표/항목(tblId/itmId)에 따라 주기(M/W) 다름 → Secrets로 제어  
+- **부동산(KOSIS)**: KOSIS는 셀 제한(40,000)이 있어 대도시만 조회하도록 구성  
 """)
             if st.button("닫기"):
                 st.session_state.show_guide = False
@@ -326,7 +325,7 @@ KR_ETF10_DEFAULT = [
 # =========================
 # Tabs
 # =========================
-tabs = st.tabs(["시장 한눈에", "국내 Top10/ETF10", "내 관심종목", "부동산(KOSIS)"])
+tabs = st.tabs(["시장 한눈에", "국내 Top10/ETF10", "내 관심종목", "부동산(KOSIS)", "경제뉴스"])
 
 # --------- TAB 1: Market Overview
 with tabs[0]:
@@ -419,7 +418,7 @@ with tabs[2]:
         plot_df(pd.DataFrame(series).dropna(how="all"), "내 관심종목 (정규화 100)", height=420)
 
 # =========================
-# TAB 4: KOSIS Real Estate (에러 방지 버전)
+# TAB 4: KOSIS Real Estate (40,000셀 회피 버전)
 # =========================
 def _pick_value_col(df: pd.DataFrame):
     for c in ["DT", "DATA_VALUE", "VALUE", "VAL"]:
@@ -428,16 +427,24 @@ def _pick_value_col(df: pd.DataFrame):
     return None
 
 def _pick_date_col(df: pd.DataFrame):
-    for c in ["PRD_DE", "TIME", "PRD_DE_NM", "PRD_DE_CODE"]:
+    for c in ["PRD_DE", "TIME"]:
         if c in df.columns:
             return c
     return None
 
+def parse_kosis_date(x: str):
+    x = re.sub(r"[^0-9]", "", str(x))
+    if len(x) == 6:
+        return pd.to_datetime(x, format="%Y%m", errors="coerce")
+    if len(x) == 8:
+        return pd.to_datetime(x, format="%Y%m%d", errors="coerce")
+    return pd.to_datetime(x, errors="coerce")
+
 @st.cache_data(ttl=60*60*6)
-def kosis_fetch_all(api_key: str, org_id: str, tbl_id: str, itm_id: str, prd_se: str, new_cnt: int = 60):
+def kosis_fetch_region(api_key: str, org_id: str, tbl_id: str, itm_id: str, prd_se: str,
+                       objL1: str, new_cnt: int = 36):
     """
-    objL1=ALL 로 1회 호출 → DataFrame 리턴
-    어떤 형태로 오든(에러 dict/빈 리스트) 절대 크래시 안 나게 처리
+    objL1을 ALL로 하지 않고 '서울/부산/대구/경기' 등 몇 개만 호출해서 40,000셀 제한 회피
     """
     base_url = "https://kosis.kr/openapi/Param/statisticsParameterData.do"
     params = {
@@ -446,7 +453,7 @@ def kosis_fetch_all(api_key: str, org_id: str, tbl_id: str, itm_id: str, prd_se:
         "orgId": org_id,
         "tblId": tbl_id,
         "itmId": itm_id,
-        "objL1": "ALL",
+        "objL1": objL1,
         "objL2": "ALL",
         "format": "json",
         "jsonVD": "Y",
@@ -456,151 +463,86 @@ def kosis_fetch_all(api_key: str, org_id: str, tbl_id: str, itm_id: str, prd_se:
     }
     try:
         r = requests.get(base_url, params=params, timeout=25)
-    except Exception:
-        return pd.DataFrame(), "request_error"
-
-    try:
         data = r.json()
     except Exception:
-        return pd.DataFrame(), "json_error"
+        return pd.DataFrame(), "request_or_json_error"
 
-    # 에러가 dict로 오는 경우가 있음
     if isinstance(data, dict):
-        return pd.DataFrame(), f"api_error: {str(data)[:180]}"
+        return pd.DataFrame(), f"api_error: {data.get('err')} {data.get('errMsg','')}".strip()
 
     if not isinstance(data, list) or len(data) == 0:
         return pd.DataFrame(), "empty"
 
-    df = pd.DataFrame(data)
-    return df, "ok"
+    return pd.DataFrame(data), "ok"
 
-def kosis_to_timeseries(df_raw: pd.DataFrame):
-    """
-    KOSIS raw를 (날짜 index) x (지역명 columns) 형태로 변환
-    obj명이 들어있는 컬럼을 자동 탐색
-    """
+def kosis_region_to_series(df_raw: pd.DataFrame) -> pd.Series:
     if df_raw is None or df_raw.empty:
-        return pd.DataFrame()
+        return pd.Series(dtype="float64")
 
-    # 날짜 컬럼
     date_col = _pick_date_col(df_raw)
-    if date_col is None:
-        return pd.DataFrame()
-
-    # 값 컬럼
     val_col = _pick_value_col(df_raw)
-    if val_col is None:
-        return pd.DataFrame()
+    if date_col is None or val_col is None:
+        return pd.Series(dtype="float64")
 
-    # 지역명 컬럼(대개 C1_NM 또는 OBJ_NM 류)
-    name_cols = [c for c in df_raw.columns if c.endswith("_NM") or c in ["OBJ_NM", "C1_NM", "C2_NM", "C3_NM"]]
-    region_col = None
-    for c in ["C1_NM", "OBJ_NM"]:
-        if c in df_raw.columns:
-            region_col = c
-            break
-    if region_col is None and len(name_cols) > 0:
-        region_col = name_cols[0]  # 가장 가능성 높은 NM 사용
-
-    if region_col is None:
-        return pd.DataFrame()
-
-    # 날짜 파싱: PRD_DE가 yyyymm 혹은 yyyymmdd 일 수 있음
-    sdate = df_raw[date_col].astype(str).str.strip()
-    # 길이에 따라 파싱
-    def parse_dt(x):
-        x = re.sub(r"[^0-9]", "", x)
-        if len(x) == 6:
-            return pd.to_datetime(x, format="%Y%m", errors="coerce")
-        if len(x) == 8:
-            return pd.to_datetime(x, format="%Y%m%d", errors="coerce")
-        return pd.to_datetime(x, errors="coerce")
-
-    idx = sdate.apply(parse_dt)
-    vals = pd.to_numeric(df_raw[val_col], errors="coerce")
-    reg = df_raw[region_col].astype(str)
-
-    temp = pd.DataFrame({"date": idx, "region": reg, "value": vals}).dropna()
-    if temp.empty:
-        return pd.DataFrame()
-
-    pivot = temp.pivot_table(index="date", columns="region", values="value", aggfunc="last").sort_index()
-    return pivot
+    idx = df_raw[date_col].apply(parse_kosis_date)
+    val = pd.to_numeric(df_raw[val_col], errors="coerce")
+    s = pd.Series(val.values, index=idx).dropna().sort_index()
+    return s
 
 with tabs[3]:
-    st.markdown('<div class="section-title">부동산 지표 (KOSIS) — 형준님 URL 기반</div>', unsafe_allow_html=True)
-    st.caption("표/항목/주기(prdSe)는 Secrets 값으로 동작합니다. (objL1=ALL 1회 호출)")
+    st.markdown('<div class="section-title">부동산 지표 (KOSIS) — 40,000셀 제한 회피</div>', unsafe_allow_html=True)
+    st.caption("KOSIS는 ALL 호출 시 결과가 40,000셀을 초과하면 차단됩니다. 서울/부산/대구/경기만 조회하도록 구성했습니다.")
 
     api_key = st.secrets.get("KOSIS_API_KEY", "").strip()
     org_id = st.secrets.get("KOSIS_ORG_ID", "408").strip()
     tbl_id = st.secrets.get("KOSIS_TBL_ID", "").strip()
-    itm_id = st.secrets.get("KOSIS_ITM_ID", "").strip()
-    prd_se = st.secrets.get("KOSIS_PRD_SE", "M").strip()  # 형준님 URL: M
+    itm_id = st.secrets.get("KOSIS_ITM_ID", "").strip().replace("+", "").strip()
+    prd_se = st.secrets.get("KOSIS_PRD_SE", "M").strip()
 
-    # itmId에 '+' 같은 것이 들어갈 수 있어 정리
-    itm_id = itm_id.replace("+", "").strip()
+    # ✅ 형준님 URL은 objL1=ALL인데, ALL을 쓰면 셀 제한 터짐
+    # 그래서 지역코드를 직접 지정해 호출합니다.
+    # ⚠️ 여기 코드(11/21/22/31)는 '많은 KOSIS 표에서' 쓰이지만,
+    # 표마다 다를 수 있어, 만약 empty면 아래 "코드 찾기" 가이드를 따라주시면 됩니다.
+    REGION_CODES = {
+        "서울": "11",
+        "부산": "21",
+        "대구": "22",
+        "경기": "31",
+    }
+
+    new_cnt = st.slider("최근 몇 개 기간(월/주)만 가져올까요?", 6, 120, 36, step=6)
 
     if not api_key or not tbl_id or not itm_id:
         st.info("Secrets에 KOSIS_API_KEY / KOSIS_TBL_ID / KOSIS_ITM_ID 가 필요합니다.")
     else:
-        df_raw, status = kosis_fetch_all(
-            api_key=api_key,
-            org_id=org_id,
-            tbl_id=tbl_id,
-            itm_id=itm_id,
-            prd_se=prd_se,
-            new_cnt=60
-        )
+        series = {}
+        errors = []
+        for name, code in REGION_CODES.items():
+            df_raw, status = kosis_fetch_region(api_key, org_id, tbl_id, itm_id, prd_se, objL1=code, new_cnt=new_cnt)
+            if status != "ok" or df_raw.empty:
+                errors.append(f"{name}({code}): {status}")
+                continue
+            s = kosis_region_to_series(df_raw)
+            if not s.empty:
+                series[name] = normalize_100(s)
 
-        if status != "ok" or df_raw.empty:
-            st.warning("부동산 데이터 호출은 실패했습니다. (다른 탭/기능은 정상)")
-            st.info(f"확인: orgId={org_id}, tblId={tbl_id}, itmId={itm_id}, prdSe={prd_se} / 상태={status}")
-            st.info("KOSIS URL에서 tblId/itmId/prdSe(M/W)를 다시 확인해 주세요.")
+        if not series:
+            st.warning("부동산 데이터를 가져오지 못했습니다. (다른 탭/기능은 정상)")
+            st.info(f"확인: orgId={org_id}, tblId={tbl_id}, itmId={itm_id}, prdSe={prd_se}")
+            st.info("현재 표에서 서울/부산/대구/경기 지역코드가 11/21/22/31이 아닐 가능성이 큽니다.")
+            st.info("✅ 해결: KOSIS 'URL보기'에서 objL1 코드(서울/부산/대구/경기)가 무엇인지 확인해 REGION_CODES만 바꾸면 됩니다.")
+            if errors:
+                st.code("\n".join(errors))
         else:
-            ts = kosis_to_timeseries(df_raw)
-
-            if ts.empty:
-                st.warning("KOSIS 응답은 받았지만 시계열 변환에 실패했습니다.")
-                st.info("이 경우 해당 표의 컬럼명이 일반형식(C1_NM/PRD_DE/DT)이 아닐 수 있어요. raw를 열어 확인해야 합니다.")
-                with st.expander("raw 데이터 확인(상위 50행)"):
-                    st.dataframe(df_raw.head(50), use_container_width=True)
-            else:
-                # 너무 많은 지역이 있으면 사용자 선택
-                cols = list(ts.columns)
-                default_pick = [c for c in cols if any(k in c for k in ["서울", "부산", "대구", "경기"])]
-                pick = st.multiselect("표시할 지역 선택", options=cols, default=default_pick[:8] if default_pick else cols[:8])
-
-                view = ts[pick] if pick else ts
-                norm = view.apply(normalize_100)
-
-                plot_df(norm, f"KOSIS 부동산 지표 (정규화 100) · prdSe={prd_se}", height=420)
-
-                with st.expander("원자료(최근 30개)"):
-                    st.dataframe(view.tail(30), use_container_width=True)
-
-st.markdown('<div class="hr"></div>', unsafe_allow_html=True)
+            df = pd.DataFrame(series).dropna(how="all")
+            plot_df(df, f"아파트 지표(정규화100) · prdSe={prd_se}", height=420)
+            with st.expander("원자료(정규화 전) 확인용 안내"):
+                st.write("현재는 비교를 위해 정규화 100으로 표시합니다. 표의 절대값(지수/가격)은 KOSIS 표 정의를 참고하세요.")
+                st.write("지역코드가 다르면 REGION_CODES만 수정하면 됩니다.")
 
 # =========================
-# Bottom: Shortcuts + News
+# TAB 5: News
 # =========================
-st.markdown("### 🔎 국내 주요경제지표 바로가기")
-btn_cols = st.columns(5)
-links = [
-    ("한국은행 ECOS", "https://ecos.bok.or.kr/"),
-    ("KOSIS", "https://kosis.kr/"),
-    ("통계청", "https://kostat.go.kr/"),
-    ("금융통계정보시스템", "https://fisis.fss.or.kr/"),
-    ("한국부동산원 R-ONE", "https://www.reb.or.kr/r-one/"),
-    ("국토교통부 통계누리", "https://stat.molit.go.kr/"),
-    ("관세청 수출입통계", "https://unipass.customs.go.kr/ets/"),
-    ("무역협회(KITA) 통계", "https://stat.kita.net/"),
-    ("FRED(미국지표)", "https://fred.stlouisfed.org/"),
-    ("Investing(참고)", "https://www.investing.com/"),
-]
-for i, (nm, url) in enumerate(links):
-    with btn_cols[i % 5]:
-        st.link_button(nm, url)
-
 @st.cache_data(ttl=60*5)
 def fetch_news_rss(limit=20, keyword=""):
     feeds = [
@@ -624,13 +566,32 @@ def fetch_news_rss(limit=20, keyword=""):
         df = df[df["title"].str.contains(keyword, case=False, na=False)]
     return df.head(limit)
 
-st.markdown("### 📰 실시간 경제뉴스")
-news_df = fetch_news_rss(limit=news_n, keyword=keyword.strip())
-if news_df.empty:
-    st.info("뉴스를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.")
-else:
-    for _, row in news_df.iterrows():
-        st.markdown(f"- [{row['title']}]({row['link']})  \n  <span class='small'>{row['published']}</span>", unsafe_allow_html=True)
+with tabs[4]:
+    st.markdown("### 🔎 국내 주요경제지표 바로가기")
+    btn_cols = st.columns(5)
+    links = [
+        ("한국은행 ECOS", "https://ecos.bok.or.kr/"),
+        ("KOSIS", "https://kosis.kr/"),
+        ("통계청", "https://kostat.go.kr/"),
+        ("금융통계정보시스템", "https://fisis.fss.or.kr/"),
+        ("한국부동산원 R-ONE", "https://www.reb.or.kr/r-one/"),
+        ("국토교통부 통계누리", "https://stat.molit.go.kr/"),
+        ("관세청 수출입통계", "https://unipass.customs.go.kr/ets/"),
+        ("무역협회(KITA) 통계", "https://stat.kita.net/"),
+        ("FRED(미국지표)", "https://fred.stlouisfed.org/"),
+        ("Investing(참고)", "https://www.investing.com/"),
+    ]
+    for i, (nm, url) in enumerate(links):
+        with btn_cols[i % 5]:
+            st.link_button(nm, url)
+
+    st.markdown("### 📰 실시간 경제뉴스")
+    news_df = fetch_news_rss(limit=news_n, keyword=keyword.strip())
+    if news_df.empty:
+        st.info("뉴스를 가져오지 못했습니다. 잠시 후 다시 시도해주세요.")
+    else:
+        for _, row in news_df.iterrows():
+            st.markdown(f"- [{row['title']}]({row['link']})  \n  <span class='small'>{row['published']}</span>", unsafe_allow_html=True)
 
 # =========================
 # Footer
