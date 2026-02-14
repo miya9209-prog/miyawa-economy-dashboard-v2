@@ -19,7 +19,7 @@ html, body, [class*="css"] { font-family: 'Noto Sans KR', sans-serif; }
 
 /* ✅ 타이틀 잘림 방지 */
 header[data-testid="stHeader"] { height: 0.0rem; }
-.block-container { max-width: 1240px; padding-top: 2.0rem; padding-bottom: 2rem; }
+.block-container { max-width: 1240px; padding-top: 2.6rem; padding-bottom: 2rem; }
 
 h1 {
   font-size: 1.65rem !important;
@@ -681,6 +681,10 @@ def render_tab(freq: str):
 
     render_news()
     st.caption("※ 무료 데이터 소스 특성상 간헐적 누락이 있을 수 있어요. 그럴 땐 ‘지금 새로고침’을 눌러주세요.")
+
+st.markdown("---")
+st.caption("© 미샵컴퍼니(MISHARP COMPANY). 무단 전재·복사·배포를 금합니다.")
+st.caption("© MISHARP COMPANY. Unauthorized reproduction, copying, or distribution is prohibited.")
 
 def render_watchlist_manager_page():
     st.subheader("관심종목 관리")
