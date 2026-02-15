@@ -1,8 +1,6 @@
 streamlit
 pandas
-numpy
-yfinance
-plotly
+openpyxl
 requests
 feedparser
-finance-datareader
+yfinance
