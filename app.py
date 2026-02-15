@@ -8,16 +8,16 @@ import yfinance as yf
 
 
 # =========================
-# Page
+# Page + CSS
 # =========================
-st.set_page_config(page_title="재테크 대시보드 v5", layout="wide")
+st.set_page_config(page_title="재테크 대시보드 v5.1", layout="wide")
 
 st.markdown(
     """
 <style>
 .block-container { padding-top: 2.4rem !important; padding-bottom: 2rem !important; }
 html, body, [class*="css"]  { font-size: 16px !important; }
-h1 { font-size: 2.1rem !important; margin: 0.2rem 0 0.4rem 0 !important; line-height: 1.2 !important; }
+h1 { font-size: 2.1rem !important; margin: 0.25rem 0 0.5rem 0 !important; line-height: 1.2 !important; }
 div[data-baseweb="tab"] button { font-size: 18px !important; padding: 10px 16px !important; }
 div[data-testid="stMetricValue"] { font-size: 24px !important; }
 </style>
@@ -57,7 +57,6 @@ def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
         k = re.sub(r"\s+", "", str(c)).lower()
         if k in norm:
             return norm[k]
-    # contains
     cols_s = [str(c) for c in cols]
     for c in candidates:
         for real in cols_s:
@@ -66,13 +65,12 @@ def pick_col(df: pd.DataFrame, candidates: List[str]) -> Optional[str]:
     return None
 
 def is_month_col(s: str) -> bool:
-    return re.fullmatch(r"\d{4}[.\-/]\d{2}", s.strip()) is not None
+    return re.fullmatch(r"\d{4}[.\-/]\d{2}", str(s).strip()) is not None
 
 def month_to_timestamp(s: str) -> pd.Timestamp:
-    # "2024.10" / "2024-10" / "2024/10"
-    m = re.split(r"[.\-/]", s.strip())
-    y, mm = int(m[0]), int(m[1])
-    return pd.Timestamp(year=y, month=mm, day=1)
+    parts = re.split(r"[.\-/]", str(s).strip())
+    y, m = int(parts[0]), int(parts[1])
+    return pd.Timestamp(year=y, month=m, day=1)
 
 
 # =========================
@@ -116,13 +114,12 @@ def normalize_tickers(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Option
     out["market"] = df[market_col].astype(str).str.strip() if market_col is not None else ""
     out["industry"] = df[industry_col].astype(str).str.strip() if industry_col is not None else ""
 
-    # 빈값/None 정리
     for c in ["code", "name", "market", "industry"]:
         out[c] = out[c].fillna("").astype(str).str.strip()
-    out = out[out["name"] != ""]
+    out = out[out["name"] != ""].reset_index(drop=True)
 
     meta = {"code_col": code_col, "name_col": name_col, "market_col": market_col, "industry_col": industry_col}
-    return out.reset_index(drop=True), meta
+    return out, meta
 
 def normalize_etfs(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional[str]]]:
     df = raw.copy()
@@ -148,14 +145,14 @@ def normalize_etfs(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, Optional[
 
     for c in ["code", "name"]:
         out[c] = out[c].fillna("").astype(str).str.strip()
-    out = out[out["name"] != ""]
+    out = out[out["name"] != ""].reset_index(drop=True)
 
     meta = {"code_col": code_col, "name_col": name_col}
-    return out.reset_index(drop=True), meta
+    return out, meta
 
 
 # =========================
-# Real estate: build city trend table
+# Real estate: Major city trend (SAFE)
 # =========================
 MAJOR_CITIES = ["서울", "부산", "대구", "인천", "광주", "대전", "울산", "세종"]
 
@@ -169,20 +166,20 @@ def detect_month_cols(df: pd.DataFrame) -> List[str]:
     return [c for c in df.columns if is_month_col(str(c))]
 
 def find_city_level(df: pd.DataFrame, region_cols: List[str]) -> Optional[str]:
-    """
-    지역별(1~4) 중에서 '서울/부산...' 같은 대도시가 실제로 들어있는 컬럼을 찾아줌
-    """
+    if not region_cols:
+        return None
+    # exact city match priority
     for c in region_cols:
         vals = df[c].astype(str).fillna("").unique().tolist()
-        hit = sum(1 for v in vals for city in MAJOR_CITIES if city == v)
-        if hit >= 3:  # 8개 중 3개 이상 보이면 그 레벨이 대도시 레벨일 확률이 큼
+        hit = sum(1 for v in vals if v in MAJOR_CITIES)
+        if hit >= 3:
             return c
-    # 그래도 없으면 '서울'이 포함되는지(부분일치)로 재시도
+    # contains match (서울특별시 등)
     for c in region_cols:
         vals = df[c].astype(str).fillna("")
         if vals.str.contains("서울").any():
             return c
-    return region_cols[-1] if region_cols else None
+    return region_cols[-1]
 
 def build_city_trend_long(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, object]]:
     df = raw.copy()
@@ -194,36 +191,32 @@ def build_city_trend_long(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, ob
         "region_cols": region_cols,
         "type_col": type_col,
         "month_cols": month_cols,
-        "city_level_col": None
+        "city_level_col": None,
     }
 
     if not month_cols:
         return pd.DataFrame(), meta
 
-    city_level = find_city_level(df, region_cols) if region_cols else None
+    city_level = find_city_level(df, region_cols)
     meta["city_level_col"] = city_level
 
-    # melt: 월 컬럼 → date/value
     id_cols = []
     if type_col and type_col in df.columns:
         id_cols.append(type_col)
     if city_level and city_level in df.columns:
         id_cols.append(city_level)
-
-    # id_cols가 너무 비면(최악) 첫번째 region col이라도 넣음
     if not id_cols and region_cols:
         id_cols = [region_cols[0]]
 
     long = df[id_cols + month_cols].copy()
 
-    # 숫자 변환
+    # numeric
     for m in month_cols:
         long[m] = pd.to_numeric(long[m].astype(str).str.replace(",", ""), errors="coerce")
 
     long = long.melt(id_vars=id_cols, value_vars=month_cols, var_name="month", value_name="value")
     long["date"] = long["month"].astype(str).apply(month_to_timestamp)
 
-    # 컬럼 표준 이름
     if type_col and type_col in id_cols:
         long = long.rename(columns={type_col: "type"})
     else:
@@ -232,17 +225,17 @@ def build_city_trend_long(raw: pd.DataFrame) -> Tuple[pd.DataFrame, Dict[str, ob
     if city_level and city_level in id_cols:
         long = long.rename(columns={city_level: "city"})
     else:
-        # 마지막 수단
         long["city"] = "전체"
 
     long["city"] = long["city"].astype(str).str.strip()
     long["type"] = long["type"].astype(str).str.strip()
 
-    return long.dropna(subset=["value"]).sort_values("date"), meta
+    long = long.dropna(subset=["value"]).sort_values("date")
+    return long, meta
 
 
 # =========================
-# Market snapshot (금 포함 fallback)
+# Market snapshot (gold fallback)
 # =========================
 @st.cache_data(ttl=60 * 15)
 def fetch_snapshot(symbol: str) -> Dict[str, Optional[float]]:
@@ -313,7 +306,7 @@ def fetch_news(max_items_total: int = 25) -> List[dict]:
 
 
 # =========================
-# Session state: watchlists
+# Session: watchlists
 # =========================
 if "watch_stocks" not in st.session_state:
     st.session_state["watch_stocks"] = {}  # code -> name
@@ -338,15 +331,15 @@ def remove_watch(kind: str, code: str):
 # =========================
 # Header
 # =========================
-st.markdown("# 📊 재테크 대시보드 v5")
-st.caption("주요지표(금 포함) · 주식/ETF 검색 & 담기 · 대도시 매매가격 추이 · 뉴스")
+st.markdown("# 📊 재테크 대시보드 v5.1 (안전판)")
+st.caption("주요지표(금 포함) · 주식/ETF 검색&담기 · 대도시 매매가격 추이 · 뉴스 · 진단")
 
-c1, c2 = st.columns([1.0, 2.2])
-with c1:
+b1, b2 = st.columns([1.0, 2.2])
+with b1:
     if st.button("🔄 새로고침"):
         st.cache_data.clear()
         st.rerun()
-with c2:
+with b2:
     st.info("로컬 데이터는 GitHub `data/`에서 읽습니다. 지표/뉴스는 인터넷이 필요합니다.", icon="ℹ️")
 
 st.markdown("---")
@@ -361,7 +354,7 @@ try:
     etfs, etfs_meta = normalize_etfs(etfs_raw)
     re_long, re_meta = build_city_trend_long(realestate_raw)
 except Exception as e:
-    st.error("data 폴더의 파일을 읽지 못했습니다. 파일명/경로/인코딩을 확인해주세요.")
+    st.error("data 폴더 파일을 읽지 못했습니다. 파일명/경로/인코딩을 확인해주세요.")
     st.exception(e)
     st.stop()
 
@@ -379,7 +372,6 @@ tab_dash, tab_stock, tab_etf, tab_re, tab_news, tab_watch, tab_debug = st.tabs(
 # =========================
 with tab_dash:
     st.subheader("오늘의 주요지표 (금 포함)")
-
     per_row = 4
     rows = [MARKET_ITEMS[i:i+per_row] for i in range(0, len(MARKET_ITEMS), per_row)]
     for row in rows:
@@ -391,10 +383,10 @@ with tab_dash:
                 cols[i].caption(f"source: {used}")
 
     st.markdown("---")
-    st.markdown("### 뉴스 Top 10")
-    items = fetch_news(10)
+    st.markdown("### 뉴스 Top 8")
+    items = fetch_news(8)
     if not items:
-        st.warning("뉴스를 불러오지 못했습니다. (RSS/네트워크 제한 가능)")
+        st.warning("뉴스를 불러오지 못했습니다.")
     else:
         for x in items:
             title = x.get("title") or "(제목 없음)"
@@ -409,10 +401,10 @@ with tab_dash:
 
 
 # =========================
-# Stocks: 검색 + 담기(확실히)
+# Stocks
 # =========================
 with tab_stock:
-    st.subheader("주식 검색 & 관심담기")
+    st.subheader("주식 검색 & 담기")
 
     with st.form("stock_form", clear_on_submit=False):
         kw = st.text_input("종목명 또는 6자리 코드", value=st.session_state.get("stock_kw", "삼성전자"))
@@ -425,29 +417,16 @@ with tab_stock:
     df = tickers.copy()
 
     if kw2:
-        df = df[
-            df["name"].str.contains(kw2, case=False, na=False)
-            | df["code"].str.contains(kw2, case=False, na=False)
-        ]
+        df = df[df["name"].str.contains(kw2, case=False, na=False) | df["code"].str.contains(kw2, case=False, na=False)]
 
-    cL, cR = st.columns([1.35, 1.0])
-    with cR:
-        st.metric("검색 결과", f"{len(df):,}개")
+    st.metric("검색 결과", f"{len(df):,}개")
 
-    with cL:
-        if len(df) == 0:
-            st.warning("검색 결과가 없습니다.")
-        else:
-            show_cols = ["code", "name"]
-            if df["market"].str.strip().any():
-                show_cols.append("market")
-            if df["industry"].str.strip().any():
-                show_cols.append("industry")
-            st.dataframe(df[show_cols].head(300), use_container_width=True, height=520)
-            st.caption("표는 최대 300개만 먼저 보여줍니다(속도/안정). 아래에서 선택 후 담기하세요.")
+    if len(df) == 0:
+        st.warning("검색 결과가 없습니다.")
+    else:
+        st.dataframe(df[["code", "name", "market", "industry"]].head(200), use_container_width=True, height=520)
+        st.caption("표는 최대 200개만 먼저 표시합니다. 아래에서 선택 후 담기하세요.")
 
-    st.markdown("### 선택 → 담기")
-    if len(df) > 0:
         options = (df["name"] + " (" + df["code"] + ")").tolist()[:5000]
         sel = st.selectbox("종목 선택", options=options, key="stock_select")
         m = re.search(r"\((\d{6})\)$", sel)
@@ -455,24 +434,20 @@ with tab_stock:
         row = df[df["code"] == code].head(1)
         if not row.empty:
             name = row.iloc[0]["name"]
-            b1, b2, b3 = st.columns([1.2, 1.2, 2.0])
-            with b1:
+            c1, c2 = st.columns([1.2, 3.0])
+            with c1:
                 if st.button("⭐ 관심주식 담기", key=f"add_stock_{code}"):
                     add_watch("stock", code, name)
-                    st.success("관심주식에 담았습니다.")
-            with b2:
-                if st.button("🗑️ 제거", key=f"rm_stock_{code}"):
-                    remove_watch("stock", code)
-                    st.info("관심주식에서 제거했습니다.")
-            with b3:
-                st.caption("관심목록 탭에서 주식/ETF를 함께 관리합니다.")
+                    st.success("담았습니다. 관심목록 탭에서 확인하세요.")
+            with c2:
+                st.caption("관심목록은 세션에 저장됩니다(앱 새로고침/재시작 시 초기화될 수 있음).")
 
 
 # =========================
-# ETF: 검색 + 담기(확실히)
+# ETF
 # =========================
 with tab_etf:
-    st.subheader("ETF 검색 & 관심담기")
+    st.subheader("ETF 검색 & 담기")
 
     with st.form("etf_form", clear_on_submit=False):
         kw = st.text_input("ETF명 또는 코드", value=st.session_state.get("etf_kw", ""))
@@ -485,24 +460,16 @@ with tab_etf:
     df = etfs.copy()
 
     if kw2:
-        df = df[
-            df["name"].str.contains(kw2, case=False, na=False)
-            | df["code"].str.contains(kw2, case=False, na=False)
-        ]
+        df = df[df["name"].str.contains(kw2, case=False, na=False) | df["code"].str.contains(kw2, case=False, na=False)]
 
-    cL, cR = st.columns([1.35, 1.0])
-    with cR:
-        st.metric("검색 결과", f"{len(df):,}개")
+    st.metric("검색 결과", f"{len(df):,}개")
 
-    with cL:
-        if len(df) == 0:
-            st.warning("검색 결과가 없습니다.")
-        else:
-            st.dataframe(df[["code", "name"]].head(300), use_container_width=True, height=520)
-            st.caption("표는 최대 300개만 먼저 보여줍니다. 아래에서 선택 후 담기하세요.")
+    if len(df) == 0:
+        st.warning("검색 결과가 없습니다.")
+    else:
+        st.dataframe(df[["code", "name"]].head(200), use_container_width=True, height=520)
+        st.caption("표는 최대 200개만 표시합니다. 아래에서 선택 후 담기하세요.")
 
-    st.markdown("### 선택 → 담기")
-    if len(df) > 0:
         options = (df["name"] + " (" + df["code"] + ")").tolist()[:5000]
         sel = st.selectbox("ETF 선택", options=options, key="etf_select")
         m = re.search(r"\((\d{6})\)$", sel)
@@ -510,73 +477,73 @@ with tab_etf:
         row = df[df["code"] == code].head(1)
         if not row.empty:
             name = row.iloc[0]["name"]
-            b1, b2, b3 = st.columns([1.2, 1.2, 2.0])
-            with b1:
+            c1, c2 = st.columns([1.2, 3.0])
+            with c1:
                 if st.button("⭐ 관심ETF 담기", key=f"add_etf_{code}"):
                     add_watch("etf", code, name)
-                    st.success("관심ETF에 담았습니다.")
-            with b2:
-                if st.button("🗑️ 제거", key=f"rm_etf_{code}"):
-                    remove_watch("etf", code)
-                    st.info("관심ETF에서 제거했습니다.")
-            with b3:
-                st.caption("관심목록 탭에서 주식/ETF를 함께 관리합니다.")
+                    st.success("담았습니다. 관심목록 탭에서 확인하세요.")
+            with c2:
+                st.caption("관심목록은 세션에 저장됩니다(앱 새로고침/재시작 시 초기화될 수 있음).")
 
 
 # =========================
-# Real Estate: Major city trend (라인차트)
+# Real Estate (SAFE slider)
 # =========================
 with tab_re:
-    st.subheader("주요 대도시 매매가격 추이 (직관적 차트)")
+    st.subheader("주요 대도시 매매가격 추이 (안정판)")
 
     if re_long.empty:
-        st.error("부동산 데이터에서 월 컬럼(예: 2024.10)을 찾지 못했습니다. 진단 탭에서 컬럼을 확인해주세요.")
+        st.error("부동산 데이터에서 월 컬럼(예: 2024.10)을 찾지 못했습니다. 진단 탭에서 month_cols를 확인해주세요.")
     else:
-        # 유형 필터
         all_types = sorted(re_long["type"].dropna().unique().tolist())
-        default_type = "종합" if "종합" in all_types else (all_types[0] if all_types else "전체")
-        sel_type = st.selectbox("주택유형 선택", options=all_types, index=all_types.index(default_type) if default_type in all_types else 0)
+        sel_type = st.selectbox("주택유형 선택", options=all_types, index=0)
 
-        # 도시 후보: 대도시가 있는 컬럼을 자동 탐지했기 때문에 city에 서울/부산 등이 들어와야 함
-        cities = sorted(re_long["city"].dropna().unique().tolist())
-
-        # '서울/부산...' 형태로 포함되는 항목만 우선 후보로
+        # city candidates
+        cities_all = sorted(re_long["city"].dropna().unique().tolist())
         major_candidates = []
-        for c in cities:
+        for c in cities_all:
             for mc in MAJOR_CITIES:
-                if mc == c or mc in c:
+                if c == mc or mc in c:
                     major_candidates.append(c)
                     break
         major_candidates = sorted(list(dict.fromkeys(major_candidates)))
+        if not major_candidates:
+            major_candidates = cities_all  # fallback
 
-        default_sel = [c for c in major_candidates if ("서울" in c or c == "서울")] or major_candidates[:4]
-        sel_cities = st.multiselect("대도시 선택", options=major_candidates if major_candidates else cities, default=default_sel)
+        default_sel = [c for c in major_candidates if "서울" in c][:1] + major_candidates[:4]
+        default_sel = list(dict.fromkeys(default_sel))[:6]
+        sel_cities = st.multiselect("대도시 선택", options=major_candidates, default=default_sel)
 
-        # 기간 선택(최근 N개월)
-        all_dates = sorted(re_long["date"].unique())
-        if len(all_dates) >= 12:
-            default_n = 12
+        # ---- SAFE months selector (절대 안 죽음)
+        all_dates = sorted(pd.to_datetime(re_long["date"]).unique())
+        total_months = len(all_dates)
+
+        if total_months == 0:
+            st.warning("월 데이터(date)가 비어 있습니다. 엑셀 월 컬럼 인식에 실패했을 가능성이 큽니다.")
+            n_months = 0
+        elif total_months < 6:
+            st.info(f"월 데이터가 {total_months}개라 슬라이더 없이 전체 기간을 표시합니다.")
+            n_months = total_months
         else:
-            default_n = len(all_dates)
-        n_months = st.slider("최근 몇 개월 표시", min_value=6, max_value=max(6, len(all_dates)), value=min(default_n, len(all_dates)), step=1)
+            default_n = 12 if total_months >= 12 else total_months
+            n_months = st.slider("최근 몇 개월 표시", min_value=6, max_value=total_months, value=default_n, step=1)
 
         df = re_long.copy()
         df = df[df["type"] == sel_type]
         if sel_cities:
             df = df[df["city"].isin(sel_cities)]
 
-        # 최근 N개월 제한
-        recent_dates = all_dates[-n_months:]
-        df = df[df["date"].isin(recent_dates)]
+        if n_months > 0:
+            recent_dates = all_dates[-n_months:]
+            df = df[df["date"].isin(recent_dates)]
 
-        # pivot for chart
         pv = df.pivot_table(index="date", columns="city", values="value", aggfunc="mean").sort_index()
 
         st.markdown("### 📈 대도시 매매가격 추이")
         st.line_chart(pv, use_container_width=True)
 
-        st.markdown("### 표로도 보기(원하시면)")
-        st.dataframe(pv.reset_index(), use_container_width=True, height=320)
+        with st.expander("표로 보기", expanded=False):
+            st.dataframe(pv.reset_index(), use_container_width=True, height=320)
 
         st.caption(f"도시 레벨 자동감지 컬럼: {re_meta.get('city_level_col')}")
 
@@ -609,17 +576,15 @@ with tab_news:
 with tab_watch:
     st.subheader("⭐ 관심목록 (주식/ETF)")
 
-    wl_s = st.session_state.get("watch_stocks", {})
-    wl_e = st.session_state.get("watch_etfs", {})
-
     col1, col2 = st.columns(2)
 
     with col1:
-        st.markdown("### ⭐ 관심주식")
-        if not wl_s:
-            st.info("관심주식이 없습니다. 주식 탭에서 담아주세요.")
+        st.markdown("### 관심주식")
+        wl = st.session_state.get("watch_stocks", {})
+        if not wl:
+            st.info("관심주식이 없습니다.")
         else:
-            sdf = pd.DataFrame([{"code": k, "name": v} for k, v in wl_s.items()]).sort_values("name")
+            sdf = pd.DataFrame([{"code": k, "name": v} for k, v in wl.items()]).sort_values("name")
             st.dataframe(sdf, use_container_width=True, height=360)
             st.download_button(
                 "⬇️ 관심주식 CSV",
@@ -629,11 +594,12 @@ with tab_watch:
             )
 
     with col2:
-        st.markdown("### ⭐ 관심ETF")
-        if not wl_e:
-            st.info("관심ETF가 없습니다. ETF 탭에서 담아주세요.")
+        st.markdown("### 관심ETF")
+        wl = st.session_state.get("watch_etfs", {})
+        if not wl:
+            st.info("관심ETF가 없습니다.")
         else:
-            edf = pd.DataFrame([{"code": k, "name": v} for k, v in wl_e.items()]).sort_values("name")
+            edf = pd.DataFrame([{"code": k, "name": v} for k, v in wl.items()]).sort_values("name")
             st.dataframe(edf, use_container_width=True, height=360)
             st.download_button(
                 "⬇️ 관심ETF CSV",
@@ -644,36 +610,38 @@ with tab_watch:
 
 
 # =========================
-# Debug
+# Debug (항상 접근 가능)
 # =========================
 with tab_debug:
     st.subheader("🛠️ 진단")
 
-    st.markdown("### 주식 CSV 매핑")
+    st.markdown("### 1) 주식 CSV 매핑")
     st.write("원본 컬럼:", list(tickers_raw.columns))
-    st.write("매핑 결과:", tickers_meta)
-    st.dataframe(tickers.head(20), use_container_width=True)
+    st.write("매핑:", tickers_meta)
+    st.dataframe(tickers.head(30), use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### ETF CSV 매핑")
+    st.markdown("### 2) ETF CSV 매핑")
     st.write("원본 컬럼:", list(etfs_raw.columns))
-    st.write("매핑 결과:", etfs_meta)
-    st.dataframe(etfs.head(20), use_container_width=True)
+    st.write("매핑:", etfs_meta)
+    st.dataframe(etfs.head(30), use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### 부동산 컬럼 감지")
+    st.markdown("### 3) 부동산 감지")
     st.write("region_cols:", re_meta.get("region_cols"))
     st.write("type_col:", re_meta.get("type_col"))
-    st.write("month_cols(샘플):", re_meta.get("month_cols", [])[:12])
+    st.write("month_cols count:", len(re_meta.get("month_cols", [])))
+    st.write("month_cols sample:", (re_meta.get("month_cols", [])[:15]))
     st.write("city_level_col:", re_meta.get("city_level_col"))
-    st.write("re_long sample:")
-    st.dataframe(re_long.head(20), use_container_width=True)
+    if re_long.empty:
+        st.warning("re_long이 비었습니다(월 컬럼 감지 실패 가능).")
+    else:
+        st.dataframe(re_long.head(50), use_container_width=True)
 
     st.markdown("---")
-    st.markdown("### GOLD 진단")
-    st.write("GOLD는 XAUUSD=X → GC=F → GLD 순으로 시도")
+    st.markdown("### 4) GOLD 진단")
     for sym in ["XAUUSD=X", "GC=F", "GLD"]:
         snap = fetch_snapshot(sym)
         st.write(sym, "last=", snap.get("last"), "chg_pct=", snap.get("chg_pct"))
 
-st.caption("© 재테크 대시보드 v5 | 주식/ETF 담기 + 대도시 매매추이 차트 중심")
+st.caption("© 재테크 대시보드 v5.1 | 슬라이더 에러 0 · 진단 탭 항상 접근 가능")
